@@ -151,7 +151,7 @@ railway up --detach
 
 ## 📊 记忆系统详解
 
-详见 [`ARCHITECTURE.txt`](./ARCHITECTURE.txt) — 包含完整的数据库 Schema、数据流、检索算法说明。
+详见 [`ARCHITECTURE.md`](./ARCHITECTURE.md) — 包含完整的数据库 Schema、数据流、检索算法说明。
 
 ---
 
