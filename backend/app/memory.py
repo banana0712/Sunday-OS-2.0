@@ -534,33 +534,72 @@ class MemoryStore:
         conn.commit()
         conn.close()
 
-    def get_conversation_context(self, user_id: str, max_turns: int = 10, max_age_hours: int = 24) -> str:
-        """获取最近的对话流作为上下文，超时的自动淡出"""
+    def get_conversation_context(self, user_id: str, max_turns: int = 10) -> str:
+        """获取对话流上下文，两级衰减：
+           🔥 24h内：完整对话（最近10轮）
+           🌤 24-72h：每轮压缩为一句摘要
+           ❄️ >72h：不注入（重要信息已在长期记忆中）
+        """
         conn = get_db()
-        cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+        now = datetime.now()
+        hot_cutoff = (now - timedelta(hours=24)).isoformat()
+        warm_cutoff = (now - timedelta(hours=72)).isoformat()
 
-        rows = conn.execute(
-            """SELECT role, content, created_at FROM conversation_flow
+        # 🔥 热记忆：24h内完整对话
+        hot_rows = conn.execute(
+            """SELECT role, content FROM conversation_flow
                WHERE user_id = ? AND created_at > ?
                ORDER BY created_at DESC LIMIT ?""",
-            (user_id, cutoff, max_turns * 2),  # user+assistant各一条 = 一轮
+            (user_id, hot_cutoff, max_turns * 2),
         ).fetchall()
+
+        # 🌤 温记忆：24-72h，压缩为摘要
+        warm_rows = conn.execute(
+            """SELECT role, content, created_at FROM conversation_flow
+               WHERE user_id = ? AND created_at > ? AND created_at <= ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (user_id, warm_cutoff, hot_cutoff, max_turns * 2),
+        ).fetchall()
+
         conn.close()
 
-        if not rows:
-            return ""
+        parts = []
 
-        # 反转回时间顺序，过滤太短的
-        rows = list(reversed(rows))
-        lines = []
-        for r in rows[-max_turns * 2:]:  # 最近N轮
-            role_label = "👤" if r["role"] == "user" else "💕Sunday"
-            content = r["content"]
-            if len(content) > 100:
-                content = content[:100] + "..."
-            lines.append(f"{role_label}: {content}")
+        # 热记忆：完整展示
+        if hot_rows:
+            hot_rows = list(reversed(hot_rows))
+            lines = []
+            for r in hot_rows:
+                role_label = "👤" if r["role"] == "user" else "💕Sunday"
+                content = r["content"]
+                if len(content) > 120:
+                    content = content[:120] + "..."
+                lines.append(f"{role_label}: {content}")
+            parts.append("## 最近的对话\n" + "\n".join(lines))
 
-        return "\n".join(lines)
+        # 温记忆：压缩摘要
+        if warm_rows:
+            warm_rows = list(reversed(warm_rows))
+            summaries = []
+            # 按轮次分组（user+assistant交替）
+            i = 0
+            while i < len(warm_rows):
+                user_msg = ""
+                sunday_msg = ""
+                if i < len(warm_rows) and warm_rows[i]["role"] == "user":
+                    user_msg = warm_rows[i]["content"][:60]
+                    i += 1
+                if i < len(warm_rows) and warm_rows[i]["role"] == "assistant":
+                    sunday_msg = warm_rows[i]["content"][:60]
+                    i += 1
+                if user_msg:
+                    summaries.append(f"用户提到了「{user_msg}」")
+                if sunday_msg:
+                    summaries.append(f"Sunday回应了「{sunday_msg}」")
+            if summaries:
+                parts.append("## 之前的对话（记忆模糊）\n" + "\n".join(summaries[-6:]))
+
+        return "\n\n".join(parts) if parts else ""
 
     def cleanup_old_conversations(self, user_id: str, keep_hours: int = 72):
         """清理超过指定时间的对话流"""

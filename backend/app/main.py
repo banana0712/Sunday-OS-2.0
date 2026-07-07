@@ -271,7 +271,7 @@ class LLMService:
     def _build_prompt(self, user_id: str = "", chat_mode: str = "💬 聊天模式", message: str = "") -> str:
         memories = memory_store.get_context(user_id, message=message)
         profile = self._build_user_profile(user_id)
-        flow = memory_store.get_conversation_context(user_id, max_turns=10, max_age_hours=24)
+        flow = memory_store.get_conversation_context(user_id, max_turns=10)
         return SUNDAY_SYSTEM_PROMPT.format(
             current_time=time.strftime("%Y年%m月%d日 %H:%M，周%u"),
             user_profile=profile,
