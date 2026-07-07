@@ -358,19 +358,11 @@ async def chat(request: Request):
                 memories_stored=mems,
             )
 
-    # 先提取记忆（不阻塞回复）
-    extract_task = asyncio.create_task(
-        extract_memories_from_message(llm_service.client, message, user_id)
-    )
+    # 并行：聊天 + 记忆提取
+    chat_task = llm_service.chat(message, session_id, user_id)
+    extract_task = extract_memories_from_message(llm_service.client, message, user_id)
 
-    # 对话
-    response = await llm_service.chat(message, session_id, user_id)
-
-    # 等待记忆提取完成
-    try:
-        memories_stored = await extract_task
-    except Exception:
-        memories_stored = 0
+    response, memories_stored = await asyncio.gather(chat_task, extract_task)
 
     response.memories_stored = memories_stored
     return response
