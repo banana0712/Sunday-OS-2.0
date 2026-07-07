@@ -96,10 +96,12 @@ class LLMService:
 
         # 豆包(火山引擎)需要 Bearer 格式的 Authorization Header
         if self.provider == "doubao":
+            # 确保 api_key 没有重复的 Bearer 前缀
+            clean_key = api_key.replace("Bearer ", "") if api_key.startswith("Bearer ") else api_key
             self.client = AsyncOpenAI(
-                api_key=api_key or "dummy-key",
+                api_key=clean_key or "dummy-key",
                 base_url=base_url,
-                default_headers={"Authorization": f"Bearer {api_key}"},
+                default_headers={"Authorization": f"Bearer {clean_key}"},
             )
         else:
             self.client = AsyncOpenAI(
