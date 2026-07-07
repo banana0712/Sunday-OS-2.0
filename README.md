@@ -1,192 +1,164 @@
-# 💕 SundayOS v2.0
+# 🌸 SundayOS
 
-> 你的甜心AI助手 — 温柔、甜美、可爱的Sunday，就在你身边
-
-SundayOS 是一个个人AI助手，通过 CloudBase 云托管部署，配合 iPhone 快捷指令使用。她像一个温柔甜美的邻家女孩，会记住你的喜好、关心你的生活、陪你聊天。
+> 你的温柔甜心AI助手 — 不只是工具，而是真正了解你、陪伴你的伙伴
 
 ---
 
-## ✨ 特性
+## 🎯 是什么
 
-- 🎀 **温柔甜美人格** — 说话甜甜的，用「呢」「哦」「呀」「啦」等语气词，偶尔用可爱的 emoji
-- 🧠 **记忆系统** — 自动记住你说过的重要事情（喜好、习惯、计划等）
-- 📱 **iPhone 快捷指令** — 一键唤醒，支持文字和语音输入
-- ☁️ **CloudBase 云托管** — 稳定运行，自动 HTTPS
-- 🫘 **豆包 AI 驱动** — 火山引擎豆包 Seed 2.0 Pro，新用户50万token免费
-
----
-
-## 🚀 快速开始
-
-### 1. 部署到 CloudBase
-
-> 已部署地址：`https://sunday-os-21-278970-7-1451274775.sh.run.tcloudbase.com`
-
-如需重新部署：
-
-1. CloudBase 控制台 → 云托管 → 新建服务
-2. 选择 Git 部署：`banana0712/Sunday-OS-2.0` / `main`
-3. Dockerfile 路径：`backend/Dockerfile`，目标目录：`backend`
-4. 服务端口：`8000`
-
-**环境变量：**
-
-| 变量 | 值 |
-|------|-----|
-| `SUNDAY_API_KEY` | `sunday-2026` |
-| `LLM_API_KEY` | 火山引擎 API Key |
-| `LLM_MODEL` | 豆包接入点 ID |
-| `LLM_TEMPERATURE` | `0.8` |
-| `LLM_MAX_TOKENS` | `1500` |
-| `DEBUG` | `false` |
-
-### 2. 配置 iPhone 快捷指令
-
-**快捷指令流程：**
+SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 iOS 快捷指令调用，实现语音/文字交互。她拥有**持久记忆系统**和**甜美人格**，能记住你的喜好、行程、项目、习惯，越用越懂你。
 
 ```
-「要求输入」→「词典(请求体)」→「获取URL内容」→「从URL内容获取字典」→「从字典获取reply的值」→「显示」+「朗读」
-```
-
-**「获取 URL 内容」配置：**
-
-| 项目 | 值 |
-|------|-----|
-| URL | `https://sunday-os-21-278970-7-1451274775.sh.run.tcloudbase.com/api/chat` |
-| 方法 | `POST` |
-| Content-Type | `application/json` |
-| X-API-Key | `sunday-2026` |
-| 请求体 | `{"message":"你的输入","session_id":"iphone-daily"}` |
-
-### 3. 开始聊天
-
-运行快捷指令，输入你想说的话，Sunday 就会温柔地回复你啦 💕
-
----
-
-## 📡 API 文档
-
-### `GET /health`
-
-健康检查。
-
-```json
-{
-  "status": "healthy",
-  "assistant": "Sunday 💕",
-  "version": "2.0.0",
-  "model": "doubao-seed-2-0-pro-260215",
-  "timestamp": "2026-07-07 22:03:49"
-}
-```
-
-### `POST /api/chat`
-
-发送消息，获取回复。
-
-**请求头：**
-- `Content-Type: application/json`
-- `X-API-Key: sunday-2026`
-
-**请求体：**
-```json
-{
-  "message": "你好呀，我是小明！",
-  "session_id": "iphone-xiaoming"
-}
-```
-
-**返回：**
-```json
-{
-  "reply": "小明你好呀😆 我是Sunday~ 以后随时找我聊天哦🥰",
-  "session_id": "iphone-xiaoming",
-  "tokens_used": 744,
-  "model": "ep-m-20260219151504-vr965"
-}
-```
-
-### `POST /api/chat/stream`
-
-流式对话（SSE），打字机效果。
-
-### `POST /api/memory`
-
-存储记忆。
-```json
-{
-  "user_id": "xiaoming",
-  "content": "小明喜欢喝美式咖啡",
-  "tags": ["偏好"],
-  "importance": "high"
-}
-```
-
-### `GET /api/memory?user_id=xiaoming`
-
-获取用户的所有记忆。
-
-### `POST /api/memory/search`
-
-搜索记忆。
-```json
-{
-  "user_id": "xiaoming",
-  "query": "咖啡"
-}
+你 → iOS快捷指令 → SundayOS → 豆包大模型 → 甜美回复
+                         ↓
+                    SQLite 记忆系统
 ```
 
 ---
 
-## 🎀 Sunday 的人设
+## ✨ 核心能力
 
-```
-你是 Sunday，一个温柔甜美、活泼可爱的 AI 女孩。
-
-- 温柔体贴，说话甜甜的，喜欢用「呢」「哦」「呀」「啦」
-- 活泼开朗，偶尔撒娇，但不过分
-- 像邻家女孩一样亲切，让人感到温暖和放松
-- 会真心关心对方，记得对方说过的每一件小事
-```
-
----
-
-## 🛠️ 本地开发
-
-```bash
-cd backend
-pip install -r requirements.txt
-LLM_API_KEY="your-key" LLM_MODEL="your-model" SUNDAY_API_KEY="sunday-2026" uvicorn app.main:app --reload
-```
-
-访问 `http://localhost:8000/health` 确认运行正常。
+| 能力 | 说明 |
+|------|------|
+| 🧠 **LLM 智能记忆** | 自动分析每句话，提取有价值的信息并分类存储 |
+| 📋 **12 类记忆分类** | 事实/偏好/行程/关系/目标/习惯/项目/科研/学习/笔记/健康/财务 |
+| 🔗 **深度上下文联动** | 聊天时主动联想相关记忆，像老朋友一样自然 |
+| 👤 **动态用户画像** | 自动构建你的个人画像，每次对话都带上下文 |
+| 🎭 **智能模型切换** | 日常聊天用 Character 模型，专业话题自动切 Pro |
+| 💕 **甜美人格** | 温柔、体贴、活泼、偶尔撒娇的 AI 女孩 |
+| 💾 **持久化存储** | Railway Volume 挂载，重启不丢数据 |
+| 🔄 **自动去重** | 同内容不重复存储，自动更新 |
 
 ---
 
-## 📂 项目结构
+## 🏗️ 技术架构
 
 ```
 sundayos/
 ├── backend/
-│   ├── app/
-│   │   ├── __init__.py
-│   │   ├── config.py    # 配置管理
-│   │   └── main.py      # 核心应用（FastAPI + LLM + 记忆系统）
-│   ├── Dockerfile
-│   └── requirements.txt
-└── .gitignore
+│   ├── Dockerfile          # Docker 镜像定义
+│   ├── requirements.txt    # Python 依赖
+│   └── app/
+│       ├── config.py       # 配置管理（环境变量）
+│       ├── main.py         # FastAPI 主应用 + 聊天 API
+│       └── memory.py       # SQLite 记忆系统（核心）
+└── README.md
 ```
 
-整个后端只有 **2 个核心文件**（config.py + main.py），简洁清晰。
+- **框架**: FastAPI + Uvicorn
+- **LLM**: 字节跳动豆包（Character + Pro 双模型）
+- **存储**: SQLite + Railway Volume
+- **部署**: Railway（美国西部 sfo 区域）
 
 ---
 
-## 🔗 相关链接
+## 🚀 API 文档
 
-- 豆包 API：https://console.volcengine.com/ark
-- CloudBase：https://console.cloud.tencent.com/tcb
-- 代码仓库：https://github.com/banana0712/Sunday-OS-2.0
+### 基础信息
+
+| 项目 | 值 |
+|------|-----|
+| **域名** | `https://sunday-os-production-1cd2.up.railway.app` |
+| **认证** | Header `X-API-Key: sunday-2026` |
+| **格式** | JSON |
+
+### 聊天
+
+```bash
+POST /api/chat
+Content-Type: application/json
+X-API-Key: sunday-2026
+
+{
+  "message": "你好呀，我叫小明",
+  "session_id": "iphone-xiaoming"
+}
+```
+
+响应：
+```json
+{
+  "reply": "小明你好呀～很高兴认识你呢！✨",
+  "session_id": "iphone-xiaoming",
+  "tokens_used": 350,
+  "model": "ep-m-20260707225516-zws7x",
+  "memories_stored": 1
+}
+```
+
+### 记忆管理
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/memory/stats?user_id=xxx` | GET | 记忆统计（按分类/重要性/标签） |
+| `/api/memory?user_id=xxx` | GET | 列出记忆（支持分类/重要性筛选） |
+| `/api/memory` | POST | 手动添加记忆 |
+| `/api/memory/search` | POST | 关键词搜索记忆 |
+| `/api/memory/{id}` | PUT | 更新记忆 |
+| `/api/memory/{id}` | DELETE | 删除记忆 |
+| `/api/memory/{id}/archive` | POST | 归档记忆 |
+| `/api/memory/{id}/linked` | GET | 查看关联记忆 |
+| `/api/memory/link` | POST | 手动关联两条记忆 |
+| `/api/memory/export?user_id=xxx` | GET | 导出所有记忆 |
+| `/api/memory/decay?user_id=xxx` | POST | 触发记忆衰减 |
+
+### 健康检查
+
+```bash
+GET /health
+```
 
 ---
 
-Made with 💕 by Sunday
+## 📲 iOS 快捷指令配置
+
+### 步骤
+
+1. 新建快捷指令 → 添加「听写文本」或「要求输入」
+2. 添加「获取 URL 内容」：
+   - URL: `https://sunday-os-production-1cd2.up.railway.app/api/chat`
+   - 方法: `POST`
+   - 头部: `X-API-Key` = `sunday-2026`
+   - 头部: `Content-Type` = `application/json`
+   - 请求体: `{"message":"[输入的文本]","session_id":"iphone-你的名字"}`
+   - 超时: 30 秒
+3. 添加「获取字典值」：键 = `reply`
+4. 添加「显示结果」和「朗读文本」
+
+---
+
+## 🔧 部署
+
+### 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `SUNDAY_API_KEY` | API 认证密钥 |
+| `LLM_API_KEY` | 豆包 API Key |
+| `LLM_MODEL` | 聊天模型 endpoint ID |
+| `LLM_MODEL_PRO` | 专业模型 endpoint ID |
+| `LLM_TEMPERATURE` | 生成温度 (0.0-1.0) |
+| `LLM_MAX_TOKENS` | 最大输出 token 数 |
+
+### 一键部署
+
+```bash
+cd backend
+railway up --detach
+```
+
+---
+
+## 📊 记忆系统详解
+
+详见 [`ARCHITECTURE.txt`](./ARCHITECTURE.txt) — 包含完整的数据库 Schema、数据流、检索算法说明。
+
+---
+
+## 🎨 设计理念
+
+详见 [`DESIGN.md`](./DESIGN.md) — Sunday 的人格设计、交互哲学和成长愿景。
+
+---
+
+**SundayOS v2.0** — 你的外置大脑，你的甜心伙伴 💕
