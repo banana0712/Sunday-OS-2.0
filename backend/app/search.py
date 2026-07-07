@@ -4,8 +4,8 @@ SundayOS 网络搜索模块 — 实时信息收集与智能整理
 from ddgs import DDGS
 
 
-async def search_web(query: str, max_results: int = 5) -> list[dict]:
-    """执行网络搜索，返回结果列表"""
+def search_web(query: str, max_results: int = 5) -> list[dict]:
+    """执行网络搜索，返回结果列表（同步，在异步上下文中用 to_thread 调用）"""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))

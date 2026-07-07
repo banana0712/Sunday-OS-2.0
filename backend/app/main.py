@@ -501,7 +501,10 @@ async def chat(request: Request):
     search_results = None
     enhanced_message = message
     if should_search(message):
-        search_results = await asyncio.to_thread(search_web, message, 5)
+        try:
+            search_results = await asyncio.to_thread(search_web, message, 5)
+        except Exception:
+            search_results = None
         if search_results and not (len(search_results) == 1 and "搜索失败" in search_results[0].get("title", "")):
             search_text = format_search_results(search_results)
             enhanced_message = f"{message}\n\n[网络搜索结果]\n{search_text}\n\n请基于以上搜索结果回答用户的问题，语言保持Sunday的风格。"
