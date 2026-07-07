@@ -65,8 +65,24 @@ def init_db():
             UNIQUE(memory_id_a, memory_id_b)
         );
     """)
+
+    # 自动迁移：为新列添加缺失的列
+    _migrate(conn)
+
     conn.commit()
     conn.close()
+
+
+def _migrate(conn: sqlite3.Connection):
+    """自动检测并添加缺失的列"""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+    migrations = {
+        "summary": "TEXT DEFAULT ''",
+        "related_to": "TEXT DEFAULT ''",
+    }
+    for col, col_type in migrations.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {col_type}")
 
 
 # ============================================================

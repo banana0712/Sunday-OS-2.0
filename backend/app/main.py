@@ -117,7 +117,6 @@ async def extract_memories_from_message(
         )
 
         text = response.choices[0].message.content or "[]"
-        print(f"  🧠 记忆提取原始响应: {text[:200]}")
         # 清理可能的 markdown 代码块
         text = text.strip()
         if text.startswith("```"):
@@ -158,8 +157,7 @@ async def extract_memories_from_message(
 
         return stored
 
-    except (json.JSONDecodeError, Exception) as e:
-        print(f"  ⚠️ 记忆提取失败: {e}")
+    except (json.JSONDecodeError, Exception):
         return 0
 
 
