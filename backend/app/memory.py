@@ -1,5 +1,5 @@
 """
-SundayOS 记忆系统 — 持久化存储、分类管理、智能检索
+SundayOS 记忆系统 v3 — LLM智能分类 + 深度自动提取 + 去重 + 关联
 """
 import json
 import sqlite3
@@ -9,12 +9,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-
 DB_PATH = Path("/app/data/sunday_memory.db")
 
 
 def get_db() -> sqlite3.Connection:
-    """获取数据库连接"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -24,7 +22,6 @@ def get_db() -> sqlite3.Connection:
 
 
 def init_db():
-    """初始化数据库表"""
     conn = get_db()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS memories (
@@ -32,22 +29,24 @@ def init_db():
             user_id TEXT NOT NULL,
             category TEXT NOT NULL DEFAULT 'fact',
             content TEXT NOT NULL,
+            summary TEXT DEFAULT '',
             tags TEXT DEFAULT '[]',
             importance TEXT DEFAULT 'medium',
             source TEXT DEFAULT 'manual',
             access_count INTEGER DEFAULT 0,
             decay_factor REAL DEFAULT 1.0,
+            related_to TEXT DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_accessed TEXT,
             archived INTEGER DEFAULT 0
         );
-        
+
         CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, archived);
         CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(user_id, category);
         CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(user_id, importance);
         CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
-        
+
         CREATE TABLE IF NOT EXISTS memory_tags (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -55,22 +54,37 @@ def init_db():
             count INTEGER DEFAULT 1,
             UNIQUE(user_id, tag)
         );
+
+        CREATE TABLE IF NOT EXISTS memory_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            memory_id_a TEXT NOT NULL,
+            memory_id_b TEXT NOT NULL,
+            relation TEXT DEFAULT 'related',
+            created_at TEXT NOT NULL,
+            UNIQUE(memory_id_a, memory_id_b)
+        );
     """)
     conn.commit()
     conn.close()
 
 
 # ============================================================
-# 记忆类别
+# 记忆类别（扩展版）
 # ============================================================
 MEMORY_CATEGORIES = {
-    "fact":       "📋 事实",       # 客观事实（小明住在北京）
-    "preference": "💝 偏好",       # 喜好（喜欢美式咖啡）
-    "event":      "📅 行程",       # 日程事件（明天下午3点面试）
-    "relationship": "👥 关系",     # 人际关系（女朋友叫小红）
-    "goal":       "🎯 目标",       # 目标计划（今年想学钢琴）
-    "note":       "📝 笔记",       # 通用笔记
-    "habit":      "🔄 习惯",       # 生活习惯（每天7点起床）
+    "fact":           "📋 事实",          # "我是iOS开发者" "我住在北京"
+    "preference":     "💝 偏好",          # "喜欢美式咖啡" "讨厌下雨天"
+    "event":          "📅 行程",          # "明天下午3点面试" "下周去上海"
+    "relationship":   "👥 关系",          # "女朋友叫小红" "同事老王"
+    "goal":           "🎯 目标",          # "今年想学钢琴" "计划买房"
+    "habit":          "🔄 习惯",          # "每天7点起床" "每周健身3次"
+    "project":        "💼 项目",          # "正在做电商App" "负责公司CRM系统"
+    "research":       "🔬 科研",          # "研究方向是NLP" "在写论文"
+    "learning":       "📚 学习",          # "在学SwiftUI" "读完了设计模式"
+    "note":           "📝 笔记",          # 通用笔记、临时备忘
+    "health":         "❤️ 健康",          # "过敏花粉" "血压偏高"
+    "finance":        "💰 财务",          # "每月房贷8000" "买了比特币"
 }
 
 IMPORTANCE_LEVELS = {
@@ -79,6 +93,42 @@ IMPORTANCE_LEVELS = {
     "high":     {"score": 0.7, "label": "⭐⭐⭐ 很重要"},
     "critical": {"score": 1.0, "label": "💎 核心记忆"},
 }
+
+# 记忆提取提示词
+MEMORY_EXTRACTION_PROMPT = """你是一个记忆提取专家。分析用户的消息，判断其中是否包含值得长期记住的信息。
+
+## 记忆类别
+- fact: 个人事实（职业、住址、学历、技能等）
+- preference: 喜好偏好（喜欢的食物、颜色、音乐、品牌等）
+- event: 行程安排（会议、约会、旅行、面试、deadline等）
+- relationship: 人际关系（家人、朋友、同事、伴侣等）
+- goal: 目标计划（学习计划、职业目标、人生目标等）
+- habit: 生活习惯（作息、饮食、运动、工作习惯等）
+- project: 工作项目（正在做的项目、负责的任务、技术栈等）
+- research: 科研学习（研究方向、论文、实验、学术兴趣等）
+- learning: 学习进度（在学的技能、课程、书籍、学习心得等）
+- note: 一般笔记（值得记下的其他信息）
+- health: 健康信息（过敏、病史、体检、运动数据等）
+- finance: 财务信息（收入、支出、投资、贷款等）
+
+## 规则
+1. 只有真正值得长期记住的信息才提取，闲聊内容忽略
+2. 每条记忆用简洁的一句话概括（不要重复原话）
+3. 提取原句中的关键实体作为 tags
+4. 如果消息不包含任何可记忆内容，返回空数组
+
+## 输入
+用户消息: {message}
+
+## 输出格式
+只返回 JSON 数组，不要其他内容：
+[
+  {{"category": "preference", "summary": "喜欢喝美式咖啡，每天两杯", "tags": ["咖啡", "美式"], "importance": "medium"}},
+  {{"category": "fact", "summary": "是一名iOS开发者", "tags": ["iOS", "开发者"], "importance": "high"}}
+]
+
+如果没有可提取的记忆，返回: []
+"""
 
 
 # ============================================================
@@ -93,23 +143,30 @@ class MemoryStore:
         user_id: str,
         content: str,
         category: str = "fact",
+        summary: str = "",
         tags: list[str] = None,
         importance: str = "medium",
         source: str = "manual",
+        related_to: str = "",
     ) -> dict:
-        """存储一条记忆"""
+        """存储一条记忆，自动去重"""
+        # 先去重
+        existing = self._find_duplicate(user_id, summary or content, category)
+        if existing:
+            # 更新已存在的记忆
+            return self._refresh_existing(existing["id"], content, summary, tags)
+
         now = datetime.now().isoformat()
         mem_id = f"mem_{uuid.uuid4().hex[:12]}"
         tags_json = json.dumps(tags or [], ensure_ascii=False)
 
         conn = get_db()
         conn.execute(
-            """INSERT INTO memories (id, user_id, category, content, tags, importance, source, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (mem_id, user_id, category, content, tags_json, importance, source, now, now),
+            """INSERT INTO memories (id, user_id, category, content, summary, tags, importance, source, related_to, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (mem_id, user_id, category, content, summary or content, tags_json, importance, source, related_to, now, now),
         )
 
-        # 更新标签计数
         for tag in (tags or []):
             conn.execute(
                 """INSERT INTO memory_tags (user_id, tag, count) VALUES (?, ?, 1)
@@ -119,11 +176,42 @@ class MemoryStore:
 
         conn.commit()
         conn.close()
+        return self.get(mem_id)
 
+    def _find_duplicate(self, user_id: str, content: str, category: str) -> Optional[dict]:
+        """查找相似记忆（简单去重）"""
+        conn = get_db()
+        # 同分类下找内容高度相似的
+        row = conn.execute(
+            """SELECT * FROM memories WHERE user_id = ? AND category = ? AND archived = 0
+               ORDER BY created_at DESC LIMIT 5""",
+            (user_id, category),
+        ).fetchall()
+        conn.close()
+
+        content_short = content[:30]
+        for r in row:
+            d = dict(r)
+            existing = (d.get("summary", "") or d.get("content", ""))[:30]
+            if content_short == existing:
+                return d
+        return None
+
+    def _refresh_existing(self, mem_id: str, content: str, summary: str, tags: list[str]) -> dict:
+        """刷新已存在的记忆（更新时间、增加访问计数）"""
+        conn = get_db()
+        now = datetime.now().isoformat()
+        tags_json = json.dumps(tags or [], ensure_ascii=False)
+        conn.execute(
+            """UPDATE memories SET content = ?, summary = ?, tags = ?, updated_at = ?,
+               access_count = access_count + 1 WHERE id = ?""",
+            (content, summary or content, tags_json, now, mem_id),
+        )
+        conn.commit()
+        conn.close()
         return self.get(mem_id)
 
     def get(self, mem_id: str) -> Optional[dict]:
-        """获取单条记忆"""
         conn = get_db()
         row = conn.execute("SELECT * FROM memories WHERE id = ?", (mem_id,)).fetchone()
         conn.close()
@@ -142,7 +230,6 @@ class MemoryStore:
         offset: int = 0,
         include_archived: bool = False,
     ) -> list[dict]:
-        """搜索记忆"""
         conn = get_db()
         conditions = ["user_id = ?"]
         params = [user_id]
@@ -166,39 +253,66 @@ class MemoryStore:
 
         results = [self._row_to_dict(r) for r in rows]
 
-        # 如果有查询词，做关键词匹配排序
         if query and results:
             query_lower = query.lower()
             scored = []
             for r in results:
                 score = 0
-                content_lower = r["content"].lower()
+                text = (r["summary"] + " " + r["content"]).lower()
                 for word in query_lower.split():
-                    if word in content_lower:
-                        score += 1
-                # 标签匹配加分
+                    if word in text:
+                        score += 2
                 for tag in r["tags"]:
                     if tag.lower() in query_lower:
-                        score += 2
-                # 重要性加权
+                        score += 3
                 score *= IMPORTANCE_LEVELS.get(r["importance"], {"score": 0.5})["score"] * 2
-                # 访问频次加权
                 score *= (1 + 0.05 * r["access_count"])
                 scored.append((score, r))
             scored.sort(key=lambda x: x[0], reverse=True)
             results = [r for _, r in scored]
 
+        # 记录访问
+        for r in results:
+            self.record_access(r["id"])
+
         return results
 
+    def get_context(self, user_id: str, limit: int = 10, message: str = "") -> str:
+        """获取给 LLM 用的记忆上下文，按相关性排序"""
+        if message:
+            mems = self.search(user_id, query=message, limit=limit)
+        else:
+            mems = self.search(user_id, limit=limit)
+
+        if not mems:
+            return "暂无关于用户的记忆"
+
+        # 按分类分组
+        grouped = {}
+        for m in mems:
+            cat = m["category"]
+            if cat not in grouped:
+                grouped[cat] = []
+            grouped[cat].append(m)
+
+        lines = []
+        for cat, cat_mems in grouped.items():
+            cat_label = MEMORY_CATEGORIES.get(cat, cat)
+            for m in cat_mems[:3]:  # 每类最多3条
+                imp = IMPORTANCE_LEVELS.get(m["importance"], {}).get("label", "")
+                summary = m.get("summary") or m["content"]
+                lines.append(f"[{cat_label} | {imp}] {summary}")
+
+        return "\n".join(lines)
+
     def update(self, mem_id: str, **kwargs) -> Optional[dict]:
-        """更新记忆"""
         conn = get_db()
         row = conn.execute("SELECT * FROM memories WHERE id = ?", (mem_id,)).fetchone()
         if not row:
             conn.close()
             return None
 
-        allowed = ["content", "category", "importance", "tags"]
+        allowed = ["content", "summary", "category", "importance", "tags", "related_to"]
         updates = {}
         for k in allowed:
             if k in kwargs:
@@ -217,24 +331,21 @@ class MemoryStore:
         return self.get(mem_id)
 
     def delete(self, mem_id: str) -> bool:
-        """删除记忆"""
         conn = get_db()
         conn.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
+        conn.execute("DELETE FROM memory_links WHERE memory_id_a = ? OR memory_id_b = ?", (mem_id, mem_id))
         deleted = conn.total_changes > 0
         conn.commit()
         conn.close()
         return deleted
 
     def archive(self, mem_id: str) -> bool:
-        """归档记忆"""
         return self.update(mem_id, archived=1) is not None
 
     def unarchive(self, mem_id: str) -> bool:
-        """取消归档"""
         return self.update(mem_id, archived=0) is not None
 
     def record_access(self, mem_id: str):
-        """记录访问"""
         conn = get_db()
         conn.execute(
             "UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
@@ -243,21 +354,35 @@ class MemoryStore:
         conn.commit()
         conn.close()
 
-    def get_context(self, user_id: str, limit: int = 10, category: str = "") -> str:
-        """获取给 LLM 用的记忆上下文"""
-        mems = self.search(user_id, limit=limit, category=category)
-        if not mems:
-            return "暂无关于用户的记忆"
+    def link_memories(self, user_id: str, mem_id_a: str, mem_id_b: str, relation: str = "related"):
+        """关联两条记忆"""
+        conn = get_db()
+        now = datetime.now().isoformat()
+        conn.execute(
+            """INSERT OR IGNORE INTO memory_links (user_id, memory_id_a, memory_id_b, relation, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, mem_id_a, mem_id_b, relation, now),
+        )
+        conn.commit()
+        conn.close()
 
-        lines = []
-        for m in mems:
-            cat_label = MEMORY_CATEGORIES.get(m["category"], m["category"])
-            lines.append(f"[{cat_label}] {m['content']}")
-
-        return "\n".join(lines)
+    def get_linked(self, mem_id: str) -> list[dict]:
+        """获取与某条记忆关联的其他记忆"""
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT m.* FROM memories m
+               JOIN memory_links l ON (l.memory_id_b = m.id)
+               WHERE l.memory_id_a = ? AND m.archived = 0
+               UNION
+               SELECT m.* FROM memories m
+               JOIN memory_links l ON (l.memory_id_a = m.id)
+               WHERE l.memory_id_b = ? AND m.archived = 0""",
+            (mem_id, mem_id),
+        ).fetchall()
+        conn.close()
+        return [self._row_to_dict(r) for r in rows]
 
     def get_stats(self, user_id: str) -> dict:
-        """获取记忆统计"""
         conn = get_db()
         total = conn.execute(
             "SELECT COUNT(*) FROM memories WHERE user_id = ? AND archived = 0", (user_id,)
@@ -272,7 +397,7 @@ class MemoryStore:
             (user_id,),
         ).fetchall()
         for r in rows:
-            by_category[r["category"]] = r["cnt"]
+            by_category[r["category"]] = {"count": r["cnt"], "label": MEMORY_CATEGORIES.get(r["category"], r["category"])}
 
         by_importance = {}
         rows = conn.execute(
@@ -282,9 +407,14 @@ class MemoryStore:
         for r in rows:
             by_importance[r["importance"]] = r["cnt"]
 
-        # 热门标签
         tags = conn.execute(
-            "SELECT tag, count FROM memory_tags WHERE user_id = ? ORDER BY count DESC LIMIT 10",
+            "SELECT tag, count FROM memory_tags WHERE user_id = ? ORDER BY count DESC LIMIT 15",
+            (user_id,),
+        ).fetchall()
+
+        # 最近添加的
+        recent = conn.execute(
+            "SELECT id, category, summary, content, importance, created_at FROM memories WHERE user_id = ? AND archived = 0 ORDER BY created_at DESC LIMIT 5",
             (user_id,),
         ).fetchall()
 
@@ -296,12 +426,12 @@ class MemoryStore:
             "by_category": by_category,
             "by_importance": by_importance,
             "top_tags": [{"tag": t["tag"], "count": t["count"]} for t in tags],
+            "recent": [self._row_to_dict(r) for r in recent],
             "categories": MEMORY_CATEGORIES,
             "importance_levels": IMPORTANCE_LEVELS,
         }
 
     def apply_decay(self, user_id: str, days: int = 30):
-        """应用记忆衰减 — 旧且不重要的记忆自动降权"""
         conn = get_db()
         threshold = (datetime.now() - timedelta(days=days)).isoformat()
         conn.execute(
@@ -314,7 +444,6 @@ class MemoryStore:
         conn.close()
 
     def export(self, user_id: str) -> list[dict]:
-        """导出所有记忆为 JSON"""
         conn = get_db()
         rows = conn.execute(
             "SELECT * FROM memories WHERE user_id = ? ORDER BY created_at",
@@ -324,7 +453,6 @@ class MemoryStore:
         return [self._row_to_dict(r) for r in rows]
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
-        """将数据库行转为字典"""
         d = dict(row)
         d["tags"] = json.loads(d.get("tags", "[]"))
         d["archived"] = bool(d.get("archived", 0))

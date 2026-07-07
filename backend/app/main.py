@@ -2,6 +2,7 @@
 SundayOS — 你的甜心AI助手
 温柔、甜美、可爱的Sunday，就在你身边 💕
 """
+import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
@@ -14,7 +15,10 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from app.config import settings
-from app.memory import memory_store, MEMORY_CATEGORIES, IMPORTANCE_LEVELS
+from app.memory import (
+    memory_store, MEMORY_CATEGORIES, IMPORTANCE_LEVELS,
+    MEMORY_EXTRACTION_PROMPT,
+)
 
 # ============================================================
 # Sunday 的人设
@@ -93,22 +97,68 @@ def select_model(message: str) -> tuple[str, str]:
 
 
 # ============================================================
-# 智能记忆分类
+# LLM 智能记忆提取
 # ============================================================
-def classify_memory(content: str) -> str:
-    """根据内容自动分类记忆"""
-    content_lower = content.lower()
-    if any(w in content_lower for w in ["喜欢", "最爱", "偏好", "讨厌", "好吃", "好喝"]):
-        return "preference"
-    if any(w in content_lower for w in ["明天", "后天", "下周", "面试", "会议", "旅行", "约会", "日程", "安排"]):
-        return "event"
-    if any(w in content_lower for w in ["朋友", "女朋友", "男朋友", "家人", "同事", "老板", "同学"]):
-        return "relationship"
-    if any(w in content_lower for w in ["目标", "计划", "想学", "打算", "希望", "梦想"]):
-        return "goal"
-    if any(w in content_lower for w in ["每天", "习惯", "总是", "经常", "一般会"]):
-        return "habit"
-    return "fact"
+async def extract_memories_from_message(
+    client: AsyncOpenAI, message: str, user_id: str
+) -> int:
+    """用 LLM 分析消息，智能提取和分类记忆，返回存储条数"""
+    if len(message) < 10:
+        return 0
+
+    prompt = MEMORY_EXTRACTION_PROMPT.format(message=message)
+
+    try:
+        response = await client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=500,
+        )
+
+        text = response.choices[0].message.content or "[]"
+        # 清理可能的 markdown 代码块
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+        memories = json.loads(text)
+        if not isinstance(memories, list):
+            return 0
+
+        stored = 0
+        for mem in memories:
+            if not isinstance(mem, dict):
+                continue
+            category = mem.get("category", "note")
+            if category not in MEMORY_CATEGORIES:
+                category = "note"
+
+            summary = mem.get("summary", "")
+            tags = mem.get("tags", [])
+            importance = mem.get("importance", "medium")
+            if importance not in IMPORTANCE_LEVELS:
+                importance = "medium"
+
+            if summary:
+                memory_store.store(
+                    user_id=user_id,
+                    content=message,
+                    summary=summary,
+                    category=category,
+                    tags=tags,
+                    importance=importance,
+                    source="auto",
+                )
+                stored += 1
+
+        return stored
+
+    except (json.JSONDecodeError, Exception):
+        return 0
 
 
 # ============================================================
@@ -124,8 +174,8 @@ class LLMService:
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
 
-    def _build_prompt(self, user_id: str = "", chat_mode: str = "💬 聊天模式") -> str:
-        memories = memory_store.get_context(user_id)
+    def _build_prompt(self, user_id: str = "", chat_mode: str = "💬 聊天模式", message: str = "") -> str:
+        memories = memory_store.get_context(user_id, message=message)
         return SUNDAY_SYSTEM_PROMPT.format(
             current_time=time.strftime("%Y年%m月%d日 %H:%M，周%u"),
             user_context=f"用户ID: {user_id}" if user_id else "新朋友~",
@@ -135,7 +185,7 @@ class LLMService:
 
     async def chat(self, message: str, session_id: str, user_id: str = "") -> ChatResponse:
         model_id, chat_mode = select_model(message)
-        system_prompt = self._build_prompt(user_id, chat_mode)
+        system_prompt = self._build_prompt(user_id, chat_mode, message)
         max_tokens = 400 if "聊天模式" in chat_mode else self.max_tokens
 
         response = await self.client.chat.completions.create(
@@ -161,7 +211,7 @@ class LLMService:
 
     async def chat_stream(self, message: str, session_id: str, user_id: str = ""):
         model_id, chat_mode = select_model(message)
-        system_prompt = self._build_prompt(user_id, chat_mode)
+        system_prompt = self._build_prompt(user_id, chat_mode, message)
 
         stream = await self.client.chat.completions.create(
             model=model_id,
@@ -285,31 +335,42 @@ async def chat(request: Request):
     user_id = session_id.replace("iphone-", "")
     memories_stored = 0
 
-    # 手动记忆指令
+    # 手动记忆指令：记住xxx
     if message.startswith("记住") or message.startswith("帮我记"):
         content = message.replace("记住", "").replace("帮我记", "").replace("一下", "").strip()
         if content:
-            category = classify_memory(content)
-            memory_store.store(user_id, content, category=category, tags=["手动记录"], importance="high", source="manual")
+            # 用 LLM 分析这条手动记忆
+            mems = await extract_memories_from_message(
+                llm_service.client, content, user_id
+            )
+            if mems == 0:
+                # LLM 提取失败，fallback 存储
+                memory_store.store(
+                    user_id, content, summary=content,
+                    category="note", tags=["手动记录"],
+                    importance="high", source="manual",
+                )
+                mems = 1
             return ChatResponse(
-                reply=f"好的呢，我记住啦~ ✨\n[{MEMORY_CATEGORIES.get(category, category)}] {content[:50]}{'...' if len(content) > 50 else ''}",
+                reply=f"好的呢，我记住啦~ ✨ 存了 {mems} 条记忆",
                 session_id=session_id,
                 model=settings.llm_model,
-                memories_stored=1,
+                memories_stored=mems,
             )
+
+    # 先提取记忆（不阻塞回复）
+    extract_task = asyncio.create_task(
+        extract_memories_from_message(llm_service.client, message, user_id)
+    )
 
     # 对话
     response = await llm_service.chat(message, session_id, user_id)
 
-    # 自动提取重要记忆
-    if len(message) > 15 and any(kw in message for kw in [
-        "我是", "我喜欢", "我在", "我的", "我住", "我每天",
-        "我习惯", "我讨厌", "我计划", "我打算", "我明天", "我后天",
-        "女朋友", "男朋友", "家人", "朋友是",
-    ]):
-        category = classify_memory(message)
-        memory_store.store(user_id, message, category=category, tags=["自动提取"], importance="medium", source="auto")
-        memories_stored = 1
+    # 等待记忆提取完成
+    try:
+        memories_stored = await extract_task
+    except Exception:
+        memories_stored = 0
 
     response.memories_stored = memories_stored
     return response
@@ -368,12 +429,13 @@ async def store_memory(request: Request):
     if not user_id or not content:
         raise HTTPException(400, "user_id 和 content 不能为空呢~")
 
-    category = body.get("category", classify_memory(content))
+    category = body.get("category", "note")
+    summary = body.get("summary", content)
     tags = body.get("tags", [])
     importance = body.get("importance", "medium")
     source = body.get("source", "manual")
 
-    mem = memory_store.store(user_id, content, category=category, tags=tags, importance=importance, source=source)
+    mem = memory_store.store(user_id, content, summary=summary, category=category, tags=tags, importance=importance, source=source)
     return {"status": "stored", "memory": mem}
 
 
@@ -444,3 +506,26 @@ async def decay_memories(user_id: str, days: int = 30, request: Request = None):
     await verify_key(request)
     memory_store.apply_decay(user_id, days)
     return {"status": "decay_applied", "user_id": user_id, "days": days}
+
+
+@app.post("/api/memory/link")
+async def link_memories(request: Request):
+    """关联两条记忆"""
+    await verify_key(request)
+    body = await request.json()
+    user_id = body.get("user_id", "")
+    mem_a = body.get("memory_id_a", "")
+    mem_b = body.get("memory_id_b", "")
+    relation = body.get("relation", "related")
+    if not user_id or not mem_a or not mem_b:
+        raise HTTPException(400, "user_id, memory_id_a, memory_id_b 不能为空呢~")
+    memory_store.link_memories(user_id, mem_a, mem_b, relation)
+    return {"status": "linked"}
+
+
+@app.get("/api/memory/{mem_id}/linked")
+async def get_linked_memories(mem_id: str, request: Request):
+    """获取与某记忆关联的其他记忆"""
+    await verify_key(request)
+    linked = memory_store.get_linked(mem_id)
+    return {"memory_id": mem_id, "count": len(linked), "linked": linked}
