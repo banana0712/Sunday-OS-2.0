@@ -3,7 +3,8 @@ SundayOS 配置管理
 管理所有环境变量和应用配置
 
 支持的 LLM 供应商:
-  - ling_studio  : 蚂蚁 Ling Studio（推荐，50万token/天免费，OpenAI兼容）
+  - doubao       : 豆包（火山引擎，推荐，50万token免费，OpenAI兼容）
+  - ling_studio  : 蚂蚁百灵（50万token/天免费）
   - dashscope    : 阿里通义千问（2000次/天免费）
   - openai       : OpenAI 官方（需付费）
   - custom       : 自定义 OpenAI 兼容 API
@@ -14,7 +15,7 @@ from pydantic_settings import BaseSettings
 from pydantic import Field
 
 # LLM 供应商类型
-LLMProvider = Literal["ling_studio", "dashscope", "openai", "custom"]
+LLMProvider = Literal["doubao", "ling_studio", "dashscope", "openai", "custom"]
 
 
 class Settings(BaseSettings):
@@ -66,6 +67,11 @@ class Settings(BaseSettings):
     def provider_config(self) -> dict:
         """根据 llm_provider 返回对应的 API 配置"""
         configs = {
+            "doubao": {
+                "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+                "default_model": "doubao-seed-2-0-pro-260215",
+                "description": "豆包 Seed 2.0 Pro — 50万token免费，OpenAI兼容，火山引擎",
+            },
             "ling_studio": {
                 "base_url": "https://api.ant-ling.com/v1/",
                 "default_model": "Ling-2.6-1T",
@@ -87,7 +93,7 @@ class Settings(BaseSettings):
                 "description": "自定义 OpenAI 兼容 API",
             },
         }
-        return configs.get(self.llm_provider, configs["ling_studio"])
+        return configs.get(self.llm_provider, configs["doubao"])
 
     @property
     def effective_base_url(self) -> str:
