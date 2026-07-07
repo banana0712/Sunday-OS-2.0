@@ -205,8 +205,6 @@ class MemoryStore:
         return self.get(mem_id)
 
     def _auto_link(self, user_id: str, new_mem_id: str, tags: list[str]):
-
-    def _auto_link(self, user_id: str, new_mem_id: str, tags: list[str]):
         """自动关联：基于标签匹配找到相关的已有记忆"""
         if not tags:
             return
