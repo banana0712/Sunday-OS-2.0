@@ -19,6 +19,7 @@ from app.memory import (
     memory_store, MEMORY_CATEGORIES, IMPORTANCE_LEVELS,
     MEMORY_EXTRACTION_PROMPT,
 )
+from app.search import search_web, format_search_results, should_search
 
 # ============================================================
 # Sunday 的人设
@@ -496,8 +497,17 @@ async def chat(request: Request):
                 memories_stored=mems,
             )
 
+    # ── 联网搜索判断 ──
+    search_results = None
+    enhanced_message = message
+    if should_search(message):
+        search_results = await asyncio.to_thread(search_web, message, 5)
+        if search_results and not (len(search_results) == 1 and "搜索失败" in search_results[0].get("title", "")):
+            search_text = format_search_results(search_results)
+            enhanced_message = f"{message}\n\n[网络搜索结果]\n{search_text}\n\n请基于以上搜索结果回答用户的问题，语言保持Sunday的风格。"
+
     # 并行：聊天 + 记忆提取
-    chat_task = llm_service.chat(message, session_id, user_id)
+    chat_task = llm_service.chat(enhanced_message, session_id, user_id)
     extract_task = extract_memories_from_message(llm_service.client, message, user_id)
 
     response, llm_stored = await asyncio.gather(chat_task, extract_task)
