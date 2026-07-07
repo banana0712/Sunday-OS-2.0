@@ -176,34 +176,80 @@ async def extract_memories_from_message(
         return 0
 
 
-def _force_extract_identity(message: str, user_id: str) -> int:
-    """强制检测自我介绍句式，即使 LLM 漏掉也能抓住"""
+def _force_extract_info(message: str, user_id: str) -> int:
+    """强制检测关键信息句式 + 关系定义，不依赖 LLM 判断"""
     import re
-    patterns = [
-        r"我是(.+?)(?:[，。,\.\s]|$)",
-        r"我叫(.+?)(?:[，。,\.\s]|$)",
-        r"我的名字是(.+?)(?:[，。,\.\s]|$)",
-        r"可以叫我(.+?)(?:[，。,\.\s]|$)",
-        r"叫我(.+?)(?:[，。,\.\s]|$)",
+
+    stored = 0
+
+    # ── 1. 自我介绍：我是/我叫/叫我XX ──
+    identity_patterns = [
+        (r"我是(.+?)(?:[，。,\.\s]|$)", "昵称是{name}"),
+        (r"我叫(.+?)(?:[，。,\.\s]|$)", "昵称是{name}"),
+        (r"我的名字是(.+?)(?:[，。,\.\s]|$)", "昵称是{name}"),
+        (r"可以叫我(.+?)(?:[，。,\.\s]|$)", "昵称是{name}"),
+        (r"叫我(.+?)(?:[，。,\.\s]|$)", "昵称是{name}"),
     ]
 
-    for pat in patterns:
+    for pat, summary_tpl in identity_patterns:
         m = re.search(pat, message)
         if m:
             name = m.group(1).strip()
-            # 过滤太长的（超过8字不是名字）和太短的
-            if 1 <= len(name) <= 8 and name not in ["谁", "什么", "哪"]:
+            if 1 <= len(name) <= 10 and name not in ["谁", "什么", "哪", "你", "我", "他", "她"]:
                 memory_store.store(
-                    user_id=user_id,
-                    content=message,
-                    summary=f"昵称是{name}",
-                    category="fact",
-                    tags=[name, "昵称", "姓名"],
-                    importance="critical",
-                    source="auto",
+                    user_id=user_id, content=message,
+                    summary=summary_tpl.format(name=name),
+                    category="fact", tags=[name, "昵称", "姓名"],
+                    importance="critical", source="auto",
                 )
-                return 1
-    return 0
+                stored += 1
+                break  # 匹配到一个就停
+
+    # ── 2. 关系定义：你是我的XX / 我是你的XX ──
+    rel_patterns = [
+        r"你是我的(.+?)(?:[，。,\.\s]|$)",
+        r"我是你的(.+?)(?:[，。,\.\s]|$)",
+        r"你是我的(.+?)(?:[，。,\.\s]|$)",
+    ]
+
+    for pat in rel_patterns:
+        m = re.search(pat, message)
+        if m:
+            role = m.group(1).strip()
+            if 1 <= len(role) <= 8 and role not in ["谁", "什么"]:
+                memory_store.store(
+                    user_id=user_id, content=message,
+                    summary=f"用户称Sunday为「{role}」",
+                    category="relationship", tags=[role, "关系", "称呼"],
+                    importance="high", source="auto",
+                )
+                stored += 1
+                break
+
+    # ── 3. 喜好/讨厌：喜欢XX / 讨厌XX / 爱XX ──
+    pref_patterns = [
+        (r"我喜欢(.+?)(?:[，。,\.\s]|$)", "喜欢{thing}"),
+        (r"我超喜欢(.+?)(?:[，。,\.\s]|$)", "超喜欢{thing}"),
+        (r"我爱(.+?)(?:[，。,\.\s]|$)", "喜欢{thing}"),
+        (r"我讨厌(.+?)(?:[，。,\.\s]|$)", "讨厌{thing}"),
+        (r"我不喜欢(.+?)(?:[，。,\.\s]|$)", "不喜欢{thing}"),
+    ]
+
+    for pat, summary_tpl in pref_patterns:
+        m = re.search(pat, message)
+        if m:
+            thing = m.group(1).strip()
+            if 2 <= len(thing) <= 15 and thing not in ["你", "我", "他", "她", "它"]:
+                memory_store.store(
+                    user_id=user_id, content=message,
+                    summary=summary_tpl.format(thing=thing),
+                    category="preference", tags=[thing, "偏好"],
+                    importance="medium", source="auto",
+                )
+                stored += 1
+                break
+
+    return stored
 
 
 # ============================================================
@@ -451,8 +497,8 @@ async def chat(request: Request):
 
     response, llm_stored = await asyncio.gather(chat_task, extract_task)
 
-    # 强制检测：自我介绍句式（LLM 可能漏掉奇怪的昵称）
-    force_stored = _force_extract_identity(message, user_id)
+    # 强制检测：关键信息句式（自我介绍、关系定义、偏好表达）
+    force_stored = _force_extract_info(message, user_id)
 
     response.memories_stored = max(llm_stored, force_stored)
     return response
