@@ -176,6 +176,36 @@ async def extract_memories_from_message(
         return 0
 
 
+def _force_extract_identity(message: str, user_id: str) -> int:
+    """强制检测自我介绍句式，即使 LLM 漏掉也能抓住"""
+    import re
+    patterns = [
+        r"我是(.+?)(?:[，。,\.\s]|$)",
+        r"我叫(.+?)(?:[，。,\.\s]|$)",
+        r"我的名字是(.+?)(?:[，。,\.\s]|$)",
+        r"可以叫我(.+?)(?:[，。,\.\s]|$)",
+        r"叫我(.+?)(?:[，。,\.\s]|$)",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, message)
+        if m:
+            name = m.group(1).strip()
+            # 过滤太长的（超过8字不是名字）和太短的
+            if 1 <= len(name) <= 8 and name not in ["谁", "什么", "哪"]:
+                memory_store.store(
+                    user_id=user_id,
+                    content=message,
+                    summary=f"昵称是{name}",
+                    category="fact",
+                    tags=[name, "昵称", "姓名"],
+                    importance="critical",
+                    source="auto",
+                )
+                return 1
+    return 0
+
+
 # ============================================================
 # LLM 服务
 # ============================================================
@@ -419,9 +449,12 @@ async def chat(request: Request):
     chat_task = llm_service.chat(message, session_id, user_id)
     extract_task = extract_memories_from_message(llm_service.client, message, user_id)
 
-    response, memories_stored = await asyncio.gather(chat_task, extract_task)
+    response, llm_stored = await asyncio.gather(chat_task, extract_task)
 
-    response.memories_stored = memories_stored
+    # 强制检测：自我介绍句式（LLM 可能漏掉奇怪的昵称）
+    force_stored = _force_extract_identity(message, user_id)
+
+    response.memories_stored = max(llm_stored, force_stored)
     return response
 
 
