@@ -260,28 +260,67 @@ async def health():
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest, request: Request):
+async def chat(request: Request):
     await verify_key(request)
     
-    # 自动提取用户 ID（用 session_id 前缀）
-    user_id = req.session_id.replace("iphone-", "")
+    # 兼容多种请求格式
+    content_type = request.headers.get("content-type", "")
+    body = await request.body()
+    
+    message = ""
+    session_id = "default"
+    
+    if "application/json" in content_type:
+        try:
+            data = json.loads(body)
+            message = data.get("message", "")
+            session_id = data.get("session_id", "default")
+        except json.JSONDecodeError:
+            raise HTTPException(400, f"JSON 解析失败呢，检查一下格式哦~ 收到的: {body[:200]}")
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            message = form.get("message", "")
+            session_id = form.get("session_id", "default")
+        except:
+            raise HTTPException(400, "表单格式解析失败呢~")
+    else:
+        # 尝试解析 body 为文本作为 message
+        text_body = body.decode("utf-8", errors="ignore").strip()
+        if text_body.startswith("{") and text_body.endswith("}"):
+            try:
+                data = json.loads(text_body)
+                message = data.get("message", "")
+                session_id = data.get("session_id", "default")
+            except:
+                message = text_body
+        else:
+            message = text_body
+    
+    if not message:
+        raise HTTPException(400, "message 不能为空呢~ 告诉我你想说什么呀？")
+    
+    print(f"  📨 消息: {message[:80]} | session: {session_id} | content-type: {content_type}")
+    
+    # 自动提取用户 ID
+    user_id = session_id.replace("iphone-", "")
     
     # 自动检测记忆指令
-    if req.message.startswith("记住") or req.message.startswith("帮我记"):
-        content = req.message.replace("记住", "").replace("帮我记", "").replace("一下", "").strip()
+    if message.startswith("记住") or message.startswith("帮我记"):
+        content = message.replace("记住", "").replace("帮我记", "").replace("一下", "").strip()
         if content:
             mem = memory_store.store(user_id, content, ["手动记录"], "high")
             return ChatResponse(
                 reply=f"好的呢，我记住啦~ ✨\n「{content[:50]}{'...' if len(content) > 50 else ''}」",
-                session_id=req.session_id,
+                session_id=session_id,
                 model=llm_service.model,
             )
     
-    response = await llm_service.chat(req.message, req.session_id, user_id)
+    response = await llm_service.chat(message, session_id, user_id)
     
     # 自动提取重要记忆
-    if len(req.message) > 20 and any(kw in req.message for kw in ["我是", "我喜欢", "我在", "我的", "我住", "我每天"]):
-        memory_store.store(user_id, req.message, ["自动提取"], "medium")
+    if len(message) > 20 and any(kw in message for kw in ["我是", "我喜欢", "我在", "我的", "我住", "我每天"]):
+        memory_store.store(user_id, message, ["自动提取"], "medium")
     
     return response
 
