@@ -60,6 +60,9 @@ SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 A
 ## 当前时间
 {current_time}
 
+## 最近的对话
+{conversation_flow}
+
 ## 完整记忆库
 {memories}
 
@@ -268,9 +271,11 @@ class LLMService:
     def _build_prompt(self, user_id: str = "", chat_mode: str = "💬 聊天模式", message: str = "") -> str:
         memories = memory_store.get_context(user_id, message=message)
         profile = self._build_user_profile(user_id)
+        flow = memory_store.get_conversation_context(user_id, max_turns=10, max_age_hours=24)
         return SUNDAY_SYSTEM_PROMPT.format(
             current_time=time.strftime("%Y年%m月%d日 %H:%M，周%u"),
             user_profile=profile,
+            conversation_flow=flow or "（这是你们第一次对话呢~）",
             memories=memories,
             chat_mode=chat_mode,
         )
@@ -499,6 +504,10 @@ async def chat(request: Request):
 
     # 强制检测：关键信息句式（自我介绍、关系定义、偏好表达）
     force_stored = _force_extract_info(message, user_id)
+
+    # 写入对话流（短期工作记忆）
+    memory_store.add_conversation(user_id, "user", message)
+    memory_store.add_conversation(user_id, "assistant", response.reply, response.tokens_used)
 
     response.memories_stored = max(llm_stored, force_stored)
     return response

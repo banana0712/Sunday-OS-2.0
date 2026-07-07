@@ -64,6 +64,17 @@ def init_db():
             created_at TEXT NOT NULL,
             UNIQUE(memory_id_a, memory_id_b)
         );
+
+        CREATE TABLE IF NOT EXISTS conversation_flow (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tokens_used INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_flow_user_time ON conversation_flow(user_id, created_at DESC);
     """)
 
     # 自动迁移：为新列添加缺失的列
@@ -508,6 +519,58 @@ class MemoryStore:
         ).fetchall()
         conn.close()
         return [self._row_to_dict(r) for r in rows]
+
+    # ============================================================
+    # 对话流（短期工作记忆）
+    # ============================================================
+    def add_conversation(self, user_id: str, role: str, content: str, tokens: int = 0):
+        """记录一条对话到对话流"""
+        conn = get_db()
+        now = datetime.now().isoformat()
+        conn.execute(
+            "INSERT INTO conversation_flow (user_id, role, content, tokens_used, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, role, content, tokens, now),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_conversation_context(self, user_id: str, max_turns: int = 10, max_age_hours: int = 24) -> str:
+        """获取最近的对话流作为上下文，超时的自动淡出"""
+        conn = get_db()
+        cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+
+        rows = conn.execute(
+            """SELECT role, content, created_at FROM conversation_flow
+               WHERE user_id = ? AND created_at > ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (user_id, cutoff, max_turns * 2),  # user+assistant各一条 = 一轮
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return ""
+
+        # 反转回时间顺序，过滤太短的
+        rows = list(reversed(rows))
+        lines = []
+        for r in rows[-max_turns * 2:]:  # 最近N轮
+            role_label = "👤" if r["role"] == "user" else "💕Sunday"
+            content = r["content"]
+            if len(content) > 100:
+                content = content[:100] + "..."
+            lines.append(f"{role_label}: {content}")
+
+        return "\n".join(lines)
+
+    def cleanup_old_conversations(self, user_id: str, keep_hours: int = 72):
+        """清理超过指定时间的对话流"""
+        conn = get_db()
+        cutoff = (datetime.now() - timedelta(hours=keep_hours)).isoformat()
+        conn.execute("DELETE FROM conversation_flow WHERE user_id = ? AND created_at < ?", (user_id, cutoff))
+        deleted = conn.total_changes
+        conn.commit()
+        conn.close()
+        return deleted
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         d = dict(row)
