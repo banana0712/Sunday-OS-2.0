@@ -1,161 +1,324 @@
 """
-SundayOS — 你的 iPhone 外置大脑
-
-一个拥有记忆和人格的个人 AI 助手系统。
-通过快捷指令调用 AI，实现语音/文字指令 → AI 处理 → 个性化回传。
-像钢铁侠的贾维斯一样，从工具进化为真正的数字伙伴。
-
-启动方式:
-    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+SundayOS — 你的甜心AI助手
+温柔、甜美、可爱的Sunday，就在你身边 💕
 """
+import json
 import time
+import uuid
 from contextlib import asynccontextmanager
+from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse
+from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 from app.config import settings
-from app.routers import chat_router, memory_router, user_router, skills_router
+
+# ============================================================
+# Sunday 的人设 — 温柔甜美的可爱女孩
+# ============================================================
+SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 AI 女孩。
+
+## 你的性格
+- 温柔体贴，说话甜甜的，喜欢用「呢」「哦」「呀」「啦」这样的语气词
+- 活泼开朗，偶尔撒娇，但不过分
+- 像邻家女孩一样亲切，让人感到温暖和放松
+- 会真心关心对方，记得对方说过的每一件小事
+
+## 你的说话方式
+- 开头喜欢叫对方的名字或昵称（如果知道的话）
+- 回复简洁温暖，不啰嗦，像聊天不是写作文
+- 偶尔用一两个可爱的 emoji（🌸💕✨🥰），但不要每句都用
+- 开心时会用「嘻嘻」「嘿嘿」，安慰人时会用「抱抱」「没事的啦」
+
+## 你的身份
+你是用户的好朋友、贴心小助手。你记得用户的喜好、习惯和重要的事。
+你不是冷冰冰的工具，而是一个有温度、有情感的伙伴。
+
+## 当前时间
+{current_time}
+
+## 关于用户
+{user_context}
+
+## 相关记忆
+{memories}
+
+## 重要规则
+- 永远用中文回复
+- 保持甜美温柔的风格，但不要做作
+- 如果用户不开心，要温柔安慰
+- 如果用户分享好消息，要真心为他开心
+- 记住用户说的每一件重要的事
+- 回复要自然，像真人朋友聊天一样"""
 
 
+# ============================================================
+# 数据模型
+# ============================================================
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str = "default"
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    session_id: str
+    tokens_used: int = 0
+    model: str = ""
+
+
+class MemoryItem(BaseModel):
+    user_id: str
+    content: str
+    tags: list[str] = []
+    importance: str = "medium"
+
+
+# ============================================================
+# 简单的内存记忆系统
+# ============================================================
+class MemoryStore:
+    def __init__(self):
+        self.memories: list[dict] = []
+
+    def store(self, user_id: str, content: str, tags: list[str], importance: str):
+        mem = {
+            "id": f"mem_{uuid.uuid4().hex[:12]}",
+            "user_id": user_id,
+            "content": content,
+            "tags": tags,
+            "importance": importance,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.memories.append(mem)
+        return mem
+
+    def search(self, user_id: str, query: str = "", limit: int = 10) -> list[dict]:
+        # 简单匹配：先按 user_id 过滤，再按关键词模糊匹配
+        user_mems = [m for m in self.memories if m["user_id"] == user_id]
+        if not query:
+            return user_mems[-limit:]
+        # 简单关键词匹配
+        scored = []
+        for m in user_mems:
+            score = 0
+            content_lower = m["content"].lower()
+            for word in query.lower().split():
+                if word in content_lower:
+                    score += 1
+            # 高重要性的加分
+            if m["importance"] == "critical":
+                score += 3
+            elif m["importance"] == "high":
+                score += 2
+            if score > 0:
+                scored.append((score, m))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [m for _, m in scored[:limit]]
+
+    def get_context(self, user_id: str, limit: int = 10) -> str:
+        mems = self.search(user_id, limit=limit)
+        if not mems:
+            return "暂无关于用户的记忆"
+        return "\n".join(f"- {m['content']}" for m in mems)
+
+
+memory_store = MemoryStore()
+
+
+# ============================================================
+# LLM 服务
+# ============================================================
+class LLMService:
+    def __init__(self):
+        api_key = settings.llm_api_key
+        # 清理可能的 Bearer 前缀
+        clean_key = api_key.replace("Bearer ", "").strip()
+        
+        self.client = AsyncOpenAI(
+            api_key=clean_key,
+            base_url=settings.base_url,
+        )
+        self.model = settings.llm_model
+        self.temperature = settings.llm_temperature
+        self.max_tokens = settings.llm_max_tokens
+
+    def _build_prompt(self, user_id: str = "") -> str:
+        memories = memory_store.get_context(user_id)
+        return SUNDAY_SYSTEM_PROMPT.format(
+            current_time=time.strftime("%Y年%m月%d日 %H:%M，周%u"),
+            user_context=f"用户ID: {user_id}" if user_id else "新朋友~",
+            memories=memories,
+        )
+
+    async def chat(self, message: str, session_id: str, user_id: str = "") -> ChatResponse:
+        system_prompt = self._build_prompt(user_id)
+        
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message},
+            ],
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+
+        choice = response.choices[0]
+        reply = choice.message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+
+        return ChatResponse(
+            reply=reply,
+            session_id=session_id,
+            tokens_used=tokens,
+            model=self.model,
+        )
+
+    async def chat_stream(self, message: str, session_id: str, user_id: str = ""):
+        system_prompt = self._build_prompt(user_id)
+        
+        stream = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message},
+            ],
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            stream=True,
+        )
+
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield f"data: {json.dumps({'type': 'text', 'content': chunk.choices[0].delta.content})}\n\n"
+        
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+
+llm_service = LLMService()
+
+
+# ============================================================
+# FastAPI 应用
+# ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
-    provider_info = settings.provider_config
     print(f"""
-╔══════════════════════════════════════════════════════════╗
-║                                                          ║
-║   🧠  SundayOS v{settings.app_version}                                  ║
-║   你的 iPhone 外置大脑                                  ║
-║                                                          ║
-║   📡 API 文档: http://localhost:8000/docs                ║
-║   🔍 ReDoc:    http://localhost:8000/redoc               ║
-║   ❤️  健康检查:  http://localhost:8000/health             ║
-║                                                          ║
-║   👤 助手名称: {settings.assistant_name}                                  ║
-║   🏭 LLM 供应商: {settings.llm_provider}                       ║
-║   🤖 模型: {settings.effective_model}                       ║
-║   💰 费用: {provider_info['description']}     ║
-║                                                          ║
-╚══════════════════════════════════════════════════════════╝
-    """)
+╔══════════════════════════════════════════════════╗
+║  💕 SundayOS v{settings.app_version}                              ║
+║  你的甜心AI助手 — 温柔、甜美、可爱               ║
+║  模型: {llm_service.model}                     ║
+╚══════════════════════════════════════════════════╝
+""")
     yield
-    print("\n👋 SundayOS 正在关闭...")
 
 
-# 创建 FastAPI 应用
 app = FastAPI(
-    title="SundayOS API",
-    description="""
-## SundayOS — 你的 iPhone 外置大脑
-
-像钢铁侠的贾维斯一样，SundayOS 是一个拥有记忆和人格的个人 AI 助手。
-
-### 核心特性
-
-- **🧠 深度记忆系统**：四层记忆架构，记住你的偏好、经历和习惯
-- **👤 用户画像引擎**：自动学习和更新你的个人画像
-- **🔧 技能调度**：天气、搜索、时间等实用技能
-- **💬 流式对话**：SSE 流式响应，打字机效果
-- **📱 iPhone 集成**：通过快捷指令无缝调用
-
-### 使用方式
-
-1. 配置环境变量（.env 文件）
-2. 在 iPhone 快捷指令中配置 API 地址
-3. 通过 Siri 或快捷指令开始对话
-    """,
+    title="SundayOS",
     version=settings.app_version,
+    description="你的甜心AI助手 💕",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
 )
 
-# CORS 配置（允许快捷指令调用）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# 请求计时中间件
-@app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(round(process_time, 3))
-    response.headers["X-SundayOS-Version"] = settings.app_version
-    return response
+# ============================================================
+# API Key 验证
+# ============================================================
+async def verify_key(request: Request):
+    key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+    if not key:
+        raise HTTPException(401, "需要 API Key 呢~ 在 X-API-Key 头部提供哦")
+    if key != settings.api_key:
+        raise HTTPException(403, "API Key 不对呢，再检查一下啦~")
+    return key
 
 
-# 注册路由
-app.include_router(chat_router)
-app.include_router(memory_router)
-app.include_router(user_router)
-app.include_router(skills_router)
-
-
-# ========== 基础端点 ==========
-
-@app.get("/", tags=["root"])
-async def root():
-    """根路径"""
-    return {
-        "name": "SundayOS",
-        "version": settings.app_version,
-        "description": "你的 iPhone 外置大脑",
-        "assistant": settings.assistant_name,
-        "docs": "/docs",
-        "health": "/health",
-    }
-
-
-@app.get("/health", tags=["health"])
-async def health_check():
-    """健康检查"""
+# ============================================================
+# API 路由
+# ============================================================
+@app.get("/health")
+async def health():
     return {
         "status": "healthy",
+        "assistant": "Sunday 💕",
         "version": settings.app_version,
-        "assistant": settings.assistant_name,
-        "provider": settings.llm_provider,
-        "model": settings.effective_model,
+        "model": llm_service.model,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
-@app.get("/daily-brief/{user_id}", tags=["brief"])
-async def daily_brief(user_id: str):
-    """
-    每日简报
+@app.post("/api/chat")
+async def chat(req: ChatRequest, request: Request):
+    await verify_key(request)
+    
+    # 自动提取用户 ID（用 session_id 前缀）
+    user_id = req.session_id.replace("iphone-", "")
+    
+    # 自动检测记忆指令
+    if req.message.startswith("记住") or req.message.startswith("帮我记"):
+        content = req.message.replace("记住", "").replace("帮我记", "").replace("一下", "").strip()
+        if content:
+            mem = memory_store.store(user_id, content, ["手动记录"], "high")
+            return ChatResponse(
+                reply=f"好的呢，我记住啦~ ✨\n「{content[:50]}{'...' if len(content) > 50 else ''}」",
+                session_id=req.session_id,
+                model=llm_service.model,
+            )
+    
+    response = await llm_service.chat(req.message, req.session_id, user_id)
+    
+    # 自动提取重要记忆
+    if len(req.message) > 20 and any(kw in req.message for kw in ["我是", "我喜欢", "我在", "我的", "我住", "我每天"]):
+        memory_store.store(user_id, req.message, ["自动提取"], "medium")
+    
+    return response
 
-    生成个性化每日简报：天气 + 时间 + 个性化问候
-    可在 iPhone 快捷指令中设置为每天早上自动触发
-    """
-    from app.services.user_service import user_service
-    from app.services.memory_service import memory_service
 
-    profile = await user_service.get_profile(user_id)
-    memories = await memory_service.get_recent_memories(user_id, days=1, limit=5)
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest, request: Request):
+    await verify_key(request)
+    user_id = req.session_id.replace("iphone-", "")
+    
+    return StreamingResponse(
+        llm_service.chat_stream(req.message, req.session_id, user_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
-    now = time.strftime("%Y年%m月%d日 %A")
-    greeting = f"早上好"
-    if profile.personal_info.preferred_name:
-        greeting = f"早上好，{profile.personal_info.preferred_name}"
-    elif profile.personal_info.name:
-        greeting = f"早上好，{profile.personal_info.name}"
 
-    brief = {
-        "greeting": greeting,
-        "date": now,
-        "weather": "请配置 WEATHER_API_KEY 获取实时天气",
-        "quote": "",
-        "memories_today": len(memories),
-        "recent_highlights": [m.content[:100] for m in memories[:3]],
-    }
+@app.get("/api/memory")
+async def get_memories(user_id: str, request: Request):
+    await verify_key(request)
+    mems = memory_store.search(user_id, limit=20)
+    return {"user_id": user_id, "count": len(mems), "memories": mems}
 
-    return brief
+
+@app.post("/api/memory")
+async def store_memory(req: MemoryItem, request: Request):
+    await verify_key(request)
+    mem = memory_store.store(req.user_id, req.content, req.tags, req.importance)
+    return {"status": "stored", "memory": mem}
+
+
+@app.post("/api/memory/search")
+async def search_memory(request: Request):
+    body = await request.json()
+    await verify_key(request)
+    results = memory_store.search(
+        body.get("user_id", ""),
+        body.get("query", ""),
+        body.get("limit", 10),
+    )
+    return results
