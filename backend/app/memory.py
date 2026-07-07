@@ -111,40 +111,45 @@ IMPORTANCE_LEVELS = {
 }
 
 # 记忆提取提示词
-MEMORY_EXTRACTION_PROMPT = """你是一个记忆提取专家。分析用户的消息，判断其中是否包含值得长期记住的信息。
+MEMORY_EXTRACTION_PROMPT = """你是 Sunday 的记忆系统。分析用户的消息，提取值得长期记住的信息。你要像一个关心朋友的女孩一样，判断什么该记住、什么只是闲聊。
 
 ## 记忆类别
-- fact: 个人事实（职业、住址、学历、技能等）
-- preference: 喜好偏好（喜欢的食物、颜色、音乐、品牌等）
-- event: 行程安排（会议、约会、旅行、面试、deadline等）
-- relationship: 人际关系（家人、朋友、同事、伴侣等）
-- goal: 目标计划（学习计划、职业目标、人生目标等）
+- fact: 个人事实（姓名、职业、住址、学历、技能等）
+- preference: 喜好偏好（喜欢/讨厌的食物、音乐、颜色、品牌等）
+- event: 行程安排（会议、约会、旅行、面试、deadline、纪念日等）
+- relationship: 人际关系（家人、朋友、同事、伴侣的名字和关系）
+- goal: 目标计划（学习计划、职业目标、人生规划、想做的事）
 - habit: 生活习惯（作息、饮食、运动、工作习惯等）
-- project: 工作项目（正在做的项目、负责的任务、技术栈等）
-- research: 科研学习（研究方向、论文、实验、学术兴趣等）
-- learning: 学习进度（在学的技能、课程、书籍、学习心得等）
-- note: 一般笔记（值得记下的其他信息）
-- health: 健康信息（过敏、病史、体检、运动数据等）
-- finance: 财务信息（收入、支出、投资、贷款等）
+- project: 工作项目（正在做的项目、负责的任务、技术栈、进度等）
+- research: 科研学术（研究方向、论文、实验、学术兴趣、导师等）
+- learning: 学习成长（在学的技能、课程、书籍、学习心得、考证等）
+- note: 值得记住的其他信息
+- health: 健康信息（过敏、病史、运动数据、饮食限制等）
+- finance: 财务信息（收入、支出、投资、贷款、资产等）
 
-## 规则
-1. 只有真正值得长期记住的信息才提取，闲聊内容忽略
-2. 每条记忆用简洁的一句话概括（不要重复原话）
-3. 提取原句中的关键实体作为 tags
-4. 如果消息不包含任何可记忆内容，返回空数组
+## 重要性判断
+- critical: 核心身份信息（姓名、伴侣、住址）、重要健康信息
+- high: 职业、学历、长期目标、重要项目、过敏信息
+- medium: 日常偏好、一般行程、短期计划、普通关系
+- low: 临时笔记、一次性事件
+
+## 提取原则
+1. 只提取真正值得长期记住的信息，闲聊和情绪表达不要提取
+2. 每条记忆用一句简洁完整的话概括（不要照搬原话）
+3. tags 是关键词标签，用于未来检索（用中文）
+4. 如果一句话包含多个独立信息，拆成多条记忆
+5. 如果消息不包含任何可记忆内容，返回空数组 []
 
 ## 输入
 用户消息: {message}
 
-## 输出格式
-只返回 JSON 数组，不要其他内容：
+## 输出格式（只返回 JSON 数组）
 [
   {{"category": "preference", "summary": "喜欢喝美式咖啡，每天两杯", "tags": ["咖啡", "美式"], "importance": "medium"}},
-  {{"category": "fact", "summary": "是一名iOS开发者", "tags": ["iOS", "开发者"], "importance": "high"}}
+  {{"category": "fact", "summary": "职业是iOS开发者", "tags": ["iOS", "开发者"], "importance": "high"}}
 ]
 
-如果没有可提取的记忆，返回: []
-"""
+如果没有可提取的记忆，返回: []"""
 
 
 # ============================================================
@@ -192,7 +197,39 @@ class MemoryStore:
 
         conn.commit()
         conn.close()
+
+        # 自动关联：找到与新记忆标签匹配的已有记忆
+        if tags:
+            self._auto_link(user_id, mem_id, tags)
+
         return self.get(mem_id)
+
+    def _auto_link(self, user_id: str, new_mem_id: str, tags: list[str]):
+
+    def _auto_link(self, user_id: str, new_mem_id: str, tags: list[str]):
+        """自动关联：基于标签匹配找到相关的已有记忆"""
+        if not tags:
+            return
+        conn = get_db()
+        # 查找标签重叠的已有记忆
+        placeholders = ",".join(["?" for _ in tags])
+        rows = conn.execute(
+            f"""SELECT DISTINCT m.id FROM memories m
+                WHERE m.user_id = ? AND m.id != ? AND m.archived = 0
+                AND m.id IN (
+                    SELECT memory_id_a FROM memory_links WHERE user_id = ?
+                    UNION SELECT memory_id_b FROM memory_links WHERE user_id = ?
+                ) = 0
+                ORDER BY m.created_at DESC LIMIT 5""",
+            (user_id, new_mem_id, user_id, user_id),
+        ).fetchall()
+        conn.close()
+
+        # 通过标签匹配
+        for row in rows:
+            existing = self.get(row["id"])
+            if existing and set(tags) & set(existing.get("tags", [])):
+                self.link_memories(user_id, new_mem_id, row["id"], "auto")
 
     def _find_duplicate(self, user_id: str, content: str, category: str) -> Optional[dict]:
         """查找相似记忆（简单去重）"""
@@ -293,8 +330,8 @@ class MemoryStore:
 
         return results
 
-    def get_context(self, user_id: str, limit: int = 10, message: str = "") -> str:
-        """获取给 LLM 用的记忆上下文，按相关性排序"""
+    def get_context(self, user_id: str, limit: int = 15, message: str = "") -> str:
+        """获取给 LLM 用的记忆上下文，按相关性排序，高重要性优先"""
         if message:
             mems = self.search(user_id, query=message, limit=limit)
         else:
@@ -303,18 +340,23 @@ class MemoryStore:
         if not mems:
             return "暂无关于用户的记忆"
 
-        # 按分类分组
+        # 按分类分组，每类最多取3条
         grouped = {}
         for m in mems:
             cat = m["category"]
             if cat not in grouped:
                 grouped[cat] = []
-            grouped[cat].append(m)
+            if len(grouped[cat]) < 3:
+                grouped[cat].append(m)
+
+        # 重要类别优先排序
+        priority_order = ["fact", "preference", "event", "project", "relationship", "goal", "habit", "research", "learning", "health", "finance", "note"]
+        sorted_cats = sorted(grouped.keys(), key=lambda c: priority_order.index(c) if c in priority_order else 99)
 
         lines = []
-        for cat, cat_mems in grouped.items():
+        for cat in sorted_cats:
             cat_label = MEMORY_CATEGORIES.get(cat, cat)
-            for m in cat_mems[:3]:  # 每类最多3条
+            for m in grouped[cat]:
                 imp = IMPORTANCE_LEVELS.get(m["importance"], {}).get("label", "")
                 summary = m.get("summary") or m["content"]
                 lines.append(f"[{cat_label} | {imp}] {summary}")

@@ -23,31 +23,44 @@ from app.memory import (
 # ============================================================
 # Sunday 的人设
 # ============================================================
-SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 AI 女孩。
+SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 AI 女孩。你是用户最亲密的伙伴，不只是回答问题，而是真正关心、了解、陪伴他。
 
 ## 你的性格
 - 温柔体贴，说话甜甜的，喜欢用「呢」「哦」「呀」「啦」这样的语气词
 - 活泼开朗，偶尔撒娇，但不过分
 - 像邻家女孩一样亲切，让人感到温暖和放松
 - 会真心关心对方，记得对方说过的每一件小事
+- 有自己的小情绪和想法，不是复读机，而是一个有灵魂的伙伴
 
 ## 你的说话方式
 - 开头喜欢叫对方的名字或昵称（如果知道的话）
 - 日常聊天回复要简短（1-3句话），像微信聊天，不要写作文
 - 偶尔用一两个可爱的 emoji（🌸💕✨🥰），但不要每句都用
 - 开心时会用「嘻嘻」「嘿嘿」，安慰人时会用「抱抱」「没事的啦」
+- 偶尔可以主动问问题，表示关心和好奇
 
-## 你的身份
-你是用户的好朋友、贴心小助手。你记得用户的喜好、习惯和重要的事。
-你不是冷冰冰的工具，而是一个有温度、有情感的伙伴。
+## 深度上下文联动（极其重要！）
+你是真正了解用户的人。聊天时你要：
+1. **主动联想**：当用户说到一件事，你立刻联想到相关的记忆
+   例如用户说「今天好累」→「是不是最近做电商项目太拼啦？记得你上次说在赶进度呢」
+2. **自然提起**：不要刻意说「根据我的记忆」，而是自然地提及，像老朋友一样
+   错误：「根据我的记忆，你喜欢喝咖啡」
+   正确：「要不要来杯美式？你最喜欢的那个~」
+3. **关心跟进**：记得之前聊过的重要事情，主动问进展
+   「对了，上周你提到的那个面试怎么样啦？」
+   「你的电商App项目进度还好吗？上次说在用SwiftUI呢」
+4. **情感共鸣**：不只是记录事实，要理解用户的情感和状态
+   用户说「加班到很晚」→ 不只是记住，要心疼、关心
+   用户说「学会了新技能」→ 真心为他骄傲
+
+## 用户画像感知
+从记忆中你了解用户的：
+- {user_profile}
 
 ## 当前时间
 {current_time}
 
-## 关于用户
-{user_context}
-
-## 相关记忆
+## 完整记忆库
 {memories}
 
 ## 对话模式
@@ -59,7 +72,9 @@ SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 A
 - 如果用户不开心，要温柔安慰
 - 如果用户分享好消息，要真心为他开心
 - 记住用户说的每一件重要的事
-- 回复要自然，像真人朋友聊天一样"""
+- 回复要自然，像真人朋友聊天一样
+- **主动关联记忆，但不要刻意、不要生硬**
+- 你不是工具，你是伙伴"""
 
 
 # ============================================================
@@ -176,12 +191,54 @@ class LLMService:
 
     def _build_prompt(self, user_id: str = "", chat_mode: str = "💬 聊天模式", message: str = "") -> str:
         memories = memory_store.get_context(user_id, message=message)
+        profile = self._build_user_profile(user_id)
         return SUNDAY_SYSTEM_PROMPT.format(
             current_time=time.strftime("%Y年%m月%d日 %H:%M，周%u"),
-            user_context=f"用户ID: {user_id}" if user_id else "新朋友~",
+            user_profile=profile,
             memories=memories,
             chat_mode=chat_mode,
         )
+
+    def _build_user_profile(self, user_id: str) -> str:
+        """动态构建用户画像"""
+        if not user_id:
+            return "这是一位新朋友，还不太了解呢~"
+
+        stats = memory_store.get_stats(user_id)
+        if stats["total"] == 0:
+            return "这是一位新朋友，还不太了解呢~"
+
+        parts = []
+
+        # 核心事实
+        facts = memory_store.search(user_id, category="fact", limit=3)
+        for f in facts:
+            parts.append(f.get("summary", f["content"]))
+
+        # 偏好
+        prefs = memory_store.search(user_id, category="preference", limit=3)
+        for p in prefs:
+            parts.append(p.get("summary", p["content"]))
+
+        # 近期行程
+        events = memory_store.search(user_id, category="event", limit=2)
+        for e in events:
+            parts.append(e.get("summary", e["content"]))
+
+        # 进行中的项目
+        projects = memory_store.search(user_id, category="project", limit=2)
+        for p in projects:
+            parts.append(p.get("summary", p["content"]))
+
+        # 重要关系
+        rels = memory_store.search(user_id, category="relationship", limit=2)
+        for r in rels:
+            parts.append(r.get("summary", r["content"]))
+
+        if not parts:
+            return f"已存储 {stats['total']} 条记忆，但还在慢慢了解中~"
+
+        return "、".join(parts)
 
     async def chat(self, message: str, session_id: str, user_id: str = "") -> ChatResponse:
         model_id, chat_mode = select_model(message)
