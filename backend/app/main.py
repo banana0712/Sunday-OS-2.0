@@ -4,20 +4,20 @@ SundayOS — 你的甜心AI助手
 """
 import json
 import time
-import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from app.config import settings
+from app.memory import memory_store, MEMORY_CATEGORIES, IMPORTANCE_LEVELS
 
 # ============================================================
-# Sunday 的人设 — 温柔甜美的可爱女孩
+# Sunday 的人设
 # ============================================================
 SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 AI 女孩。
 
@@ -46,7 +46,7 @@ SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 A
 ## 相关记忆
 {memories}
 
-## 对话模式（根据话题自动切换）
+## 对话模式
 {chat_mode}
 
 ## 重要规则
@@ -71,71 +71,12 @@ class ChatResponse(BaseModel):
     session_id: str
     tokens_used: int = 0
     model: str = ""
-
-
-class MemoryItem(BaseModel):
-    user_id: str
-    content: str
-    tags: list[str] = []
-    importance: str = "medium"
-
-
-# ============================================================
-# 简单的内存记忆系统
-# ============================================================
-class MemoryStore:
-    def __init__(self):
-        self.memories: list[dict] = []
-
-    def store(self, user_id: str, content: str, tags: list[str], importance: str):
-        mem = {
-            "id": f"mem_{uuid.uuid4().hex[:12]}",
-            "user_id": user_id,
-            "content": content,
-            "tags": tags,
-            "importance": importance,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        self.memories.append(mem)
-        return mem
-
-    def search(self, user_id: str, query: str = "", limit: int = 10) -> list[dict]:
-        # 简单匹配：先按 user_id 过滤，再按关键词模糊匹配
-        user_mems = [m for m in self.memories if m["user_id"] == user_id]
-        if not query:
-            return user_mems[-limit:]
-        # 简单关键词匹配
-        scored = []
-        for m in user_mems:
-            score = 0
-            content_lower = m["content"].lower()
-            for word in query.lower().split():
-                if word in content_lower:
-                    score += 1
-            # 高重要性的加分
-            if m["importance"] == "critical":
-                score += 3
-            elif m["importance"] == "high":
-                score += 2
-            if score > 0:
-                scored.append((score, m))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [m for _, m in scored[:limit]]
-
-    def get_context(self, user_id: str, limit: int = 10) -> str:
-        mems = self.search(user_id, limit=limit)
-        if not mems:
-            return "暂无关于用户的记忆"
-        return "\n".join(f"- {m['content']}" for m in mems)
-
-
-memory_store = MemoryStore()
+    memories_stored: int = 0
 
 
 # ============================================================
 # 智能模型选择
 # ============================================================
-# 专业话题关键词 → 需要深度思考
 PRO_KEYWORDS = [
     "论文", "研究", "文献", "学术", "实验", "理论", "算法",
     "代码", "编程", "bug", "架构", "设计模式", "优化", "技术",
@@ -143,12 +84,31 @@ PRO_KEYWORDS = [
     "法律", "金融", "医学", "投资", "合同", "数学", "物理", "化学",
 ]
 
+
 def select_model(message: str) -> tuple[str, str]:
-    """智能选模型：(model_id, mode_description)"""
     for kw in PRO_KEYWORDS:
         if kw in message:
-            return (settings.llm_model_pro, "🧠 专业模式 — 深度思考，详细回答")
-    return (settings.llm_model, "💬 聊天模式 — 简短温暖，像微信聊天")
+            return (settings.llm_model_pro or settings.llm_model, "🧠 专业模式")
+    return (settings.llm_model, "💬 聊天模式")
+
+
+# ============================================================
+# 智能记忆分类
+# ============================================================
+def classify_memory(content: str) -> str:
+    """根据内容自动分类记忆"""
+    content_lower = content.lower()
+    if any(w in content_lower for w in ["喜欢", "最爱", "偏好", "讨厌", "好吃", "好喝"]):
+        return "preference"
+    if any(w in content_lower for w in ["明天", "后天", "下周", "面试", "会议", "旅行", "约会", "日程", "安排"]):
+        return "event"
+    if any(w in content_lower for w in ["朋友", "女朋友", "男朋友", "家人", "同事", "老板", "同学"]):
+        return "relationship"
+    if any(w in content_lower for w in ["目标", "计划", "想学", "打算", "希望", "梦想"]):
+        return "goal"
+    if any(w in content_lower for w in ["每天", "习惯", "总是", "经常", "一般会"]):
+        return "habit"
+    return "fact"
 
 
 # ============================================================
@@ -160,7 +120,7 @@ class LLMService:
         clean_key = api_key.replace("Bearer ", "").strip()
         self.client = AsyncOpenAI(api_key=clean_key, base_url=settings.base_url)
         self.model_fast = settings.llm_model
-        self.model_pro = settings.llm_model_pro
+        self.model_pro = settings.llm_model_pro or settings.llm_model
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
 
@@ -177,7 +137,7 @@ class LLMService:
         model_id, chat_mode = select_model(message)
         system_prompt = self._build_prompt(user_id, chat_mode)
         max_tokens = 400 if "聊天模式" in chat_mode else self.max_tokens
-        
+
         response = await self.client.chat.completions.create(
             model=model_id,
             messages=[
@@ -196,14 +156,15 @@ class LLMService:
             reply=reply,
             session_id=session_id,
             tokens_used=tokens,
-            model=self.model,
+            model=model_id,
         )
 
     async def chat_stream(self, message: str, session_id: str, user_id: str = ""):
-        system_prompt = self._build_prompt(user_id)
-        
+        model_id, chat_mode = select_model(message)
+        system_prompt = self._build_prompt(user_id, chat_mode)
+
         stream = await self.client.chat.completions.create(
-            model=self.model,
+            model=model_id,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},
@@ -216,7 +177,7 @@ class LLMService:
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield f"data: {json.dumps({'type': 'text', 'content': chunk.choices[0].delta.content})}\n\n"
-        
+
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 
@@ -232,7 +193,8 @@ async def lifespan(app: FastAPI):
 ╔══════════════════════════════════════════════════╗
 ║  💕 SundayOS v{settings.app_version}                              ║
 ║  你的甜心AI助手 — 温柔、甜美、可爱               ║
-║  模型: {llm_service.model}                     ║
+║  聊天: {settings.llm_model}                     ║
+║  专业: {settings.llm_model_pro or settings.llm_model}                     ║
 ╚══════════════════════════════════════════════════╝
 """)
     yield
@@ -267,7 +229,7 @@ async def verify_key(request: Request):
 
 
 # ============================================================
-# API 路由
+# API 路由 — 聊天
 # ============================================================
 @app.get("/health")
 async def health():
@@ -275,7 +237,8 @@ async def health():
         "status": "healthy",
         "assistant": "Sunday 💕",
         "version": settings.app_version,
-        "model": llm_service.model,
+        "model_chat": settings.llm_model,
+        "model_pro": settings.llm_model_pro or settings.llm_model,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -283,66 +246,72 @@ async def health():
 @app.post("/api/chat")
 async def chat(request: Request):
     await verify_key(request)
-    
-    # 兼容多种请求格式
+
     content_type = request.headers.get("content-type", "")
     body = await request.body()
-    
+
     message = ""
     session_id = "default"
-    
+
     if "application/json" in content_type:
         try:
             data = json.loads(body)
             message = data.get("message", "")
             session_id = data.get("session_id", "default")
         except json.JSONDecodeError:
-            raise HTTPException(400, f"JSON 解析失败呢，检查一下格式哦~ 收到的: {body[:200]}")
+            raise HTTPException(400, "JSON 解析失败呢，检查一下格式哦~")
     elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
         try:
             form = await request.form()
-            message = form.get("message", "")
-            session_id = form.get("session_id", "default")
-        except:
+            message = str(form.get("message", ""))
+            session_id = str(form.get("session_id", "default"))
+        except Exception:
             raise HTTPException(400, "表单格式解析失败呢~")
     else:
-        # 尝试解析 body 为文本作为 message
         text_body = body.decode("utf-8", errors="ignore").strip()
-        if text_body.startswith("{") and text_body.endswith("}"):
+        if text_body.startswith("{"):
             try:
                 data = json.loads(text_body)
                 message = data.get("message", "")
                 session_id = data.get("session_id", "default")
-            except:
+            except json.JSONDecodeError:
                 message = text_body
         else:
             message = text_body
-    
+
     if not message:
         raise HTTPException(400, "message 不能为空呢~ 告诉我你想说什么呀？")
-    
-    print(f"  📨 消息: {message[:80]} | session: {session_id} | content-type: {content_type}")
-    
-    # 自动提取用户 ID
+
     user_id = session_id.replace("iphone-", "")
-    
-    # 自动检测记忆指令
+    memories_stored = 0
+
+    # 手动记忆指令
     if message.startswith("记住") or message.startswith("帮我记"):
         content = message.replace("记住", "").replace("帮我记", "").replace("一下", "").strip()
         if content:
-            mem = memory_store.store(user_id, content, ["手动记录"], "high")
+            category = classify_memory(content)
+            memory_store.store(user_id, content, category=category, tags=["手动记录"], importance="high", source="manual")
             return ChatResponse(
-                reply=f"好的呢，我记住啦~ ✨\n「{content[:50]}{'...' if len(content) > 50 else ''}」",
+                reply=f"好的呢，我记住啦~ ✨\n[{MEMORY_CATEGORIES.get(category, category)}] {content[:50]}{'...' if len(content) > 50 else ''}",
                 session_id=session_id,
-                model=llm_service.model,
+                model=settings.llm_model,
+                memories_stored=1,
             )
-    
+
+    # 对话
     response = await llm_service.chat(message, session_id, user_id)
-    
+
     # 自动提取重要记忆
-    if len(message) > 20 and any(kw in message for kw in ["我是", "我喜欢", "我在", "我的", "我住", "我每天"]):
-        memory_store.store(user_id, message, ["自动提取"], "medium")
-    
+    if len(message) > 15 and any(kw in message for kw in [
+        "我是", "我喜欢", "我在", "我的", "我住", "我每天",
+        "我习惯", "我讨厌", "我计划", "我打算", "我明天", "我后天",
+        "女朋友", "男朋友", "家人", "朋友是",
+    ]):
+        category = classify_memory(message)
+        memory_store.store(user_id, message, category=category, tags=["自动提取"], importance="medium", source="auto")
+        memories_stored = 1
+
+    response.memories_stored = memories_stored
     return response
 
 
@@ -350,7 +319,6 @@ async def chat(request: Request):
 async def chat_stream(req: ChatRequest, request: Request):
     await verify_key(request)
     user_id = req.session_id.replace("iphone-", "")
-    
     return StreamingResponse(
         llm_service.chat_stream(req.message, req.session_id, user_id),
         media_type="text/event-stream",
@@ -358,27 +326,121 @@ async def chat_stream(req: ChatRequest, request: Request):
     )
 
 
-@app.get("/api/memory")
-async def get_memories(user_id: str, request: Request):
+# ============================================================
+# API 路由 — 记忆管理
+# ============================================================
+@app.get("/api/memory/stats")
+async def memory_stats(user_id: str, request: Request):
+    """获取记忆统计信息"""
     await verify_key(request)
-    mems = memory_store.search(user_id, limit=20)
-    return {"user_id": user_id, "count": len(mems), "memories": mems}
+    return memory_store.get_stats(user_id)
+
+
+@app.get("/api/memory")
+async def list_memories(
+    user_id: str,
+    request: Request,
+    category: str = Query("", description="按分类筛选"),
+    importance: str = Query("", description="按重要性筛选"),
+    limit: int = Query(20),
+    offset: int = Query(0),
+):
+    """获取记忆列表"""
+    await verify_key(request)
+    mems = memory_store.search(user_id, category=category, importance=importance, limit=limit, offset=offset)
+    return {
+        "user_id": user_id,
+        "count": len(mems),
+        "categories": MEMORY_CATEGORIES,
+        "importance_levels": {k: v["label"] for k, v in IMPORTANCE_LEVELS.items()},
+        "memories": mems,
+    }
 
 
 @app.post("/api/memory")
-async def store_memory(req: MemoryItem, request: Request):
+async def store_memory(request: Request):
+    """手动存储一条记忆"""
     await verify_key(request)
-    mem = memory_store.store(req.user_id, req.content, req.tags, req.importance)
+    body = await request.json()
+
+    user_id = body.get("user_id", "")
+    content = body.get("content", "")
+    if not user_id or not content:
+        raise HTTPException(400, "user_id 和 content 不能为空呢~")
+
+    category = body.get("category", classify_memory(content))
+    tags = body.get("tags", [])
+    importance = body.get("importance", "medium")
+    source = body.get("source", "manual")
+
+    mem = memory_store.store(user_id, content, category=category, tags=tags, importance=importance, source=source)
     return {"status": "stored", "memory": mem}
 
 
 @app.post("/api/memory/search")
 async def search_memory(request: Request):
-    body = await request.json()
+    """搜索记忆"""
     await verify_key(request)
+    body = await request.json()
     results = memory_store.search(
         body.get("user_id", ""),
-        body.get("query", ""),
-        body.get("limit", 10),
+        query=body.get("query", ""),
+        category=body.get("category", ""),
+        importance=body.get("importance", ""),
+        limit=body.get("limit", 20),
     )
-    return results
+    return {"query": body.get("query", ""), "count": len(results), "memories": results}
+
+
+@app.put("/api/memory/{mem_id}")
+async def update_memory(mem_id: str, request: Request):
+    """更新记忆"""
+    await verify_key(request)
+    body = await request.json()
+    result = memory_store.update(mem_id, **body)
+    if not result:
+        raise HTTPException(404, "找不到这条记忆呢~")
+    return {"status": "updated", "memory": result}
+
+
+@app.delete("/api/memory/{mem_id}")
+async def delete_memory(mem_id: str, request: Request):
+    """删除记忆"""
+    await verify_key(request)
+    if memory_store.delete(mem_id):
+        return {"status": "deleted", "memory_id": mem_id}
+    raise HTTPException(404, "找不到这条记忆呢~")
+
+
+@app.post("/api/memory/{mem_id}/archive")
+async def archive_memory(mem_id: str, request: Request):
+    """归档记忆"""
+    await verify_key(request)
+    if memory_store.archive(mem_id):
+        return {"status": "archived", "memory_id": mem_id}
+    raise HTTPException(404, "找不到这条记忆呢~")
+
+
+@app.post("/api/memory/{mem_id}/unarchive")
+async def unarchive_memory(mem_id: str, request: Request):
+    """取消归档"""
+    await verify_key(request)
+    if memory_store.unarchive(mem_id):
+        return {"status": "unarchived", "memory_id": mem_id}
+    raise HTTPException(404, "找不到这条记忆呢~")
+
+
+@app.get("/api/memory/export")
+async def export_memories(user_id: str, request: Request):
+    """导出所有记忆"""
+    await verify_key(request)
+    mems = memory_store.export(user_id)
+    return {"user_id": user_id, "count": len(mems), "memories": mems}
+
+
+@app.post("/api/memory/decay")
+async def decay_memories(user_id: str, days: int = 30, request: Request = None):
+    """手动触发记忆衰减"""
+    await verify_key(request)
+    memory_store.apply_decay(user_id, days)
+    return {"status": "decay_applied", "user_id": user_id, "days": days}
