@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # 豆包(火山引擎)
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_model: str = Field(default="doubao-seed-2-0-pro-260215", alias="LLM_MODEL")
+    llm_model_pro: str = Field(default="", alias="LLM_MODEL_PRO")
     llm_temperature: float = Field(default=0.8, alias="LLM_TEMPERATURE")
     llm_max_tokens: int = Field(default=1500, alias="LLM_MAX_TOKENS")
 

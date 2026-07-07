@@ -29,7 +29,7 @@ SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 A
 
 ## 你的说话方式
 - 开头喜欢叫对方的名字或昵称（如果知道的话）
-- 回复简洁温暖，不啰嗦，像聊天不是写作文
+- 日常聊天回复要简短（1-3句话），像微信聊天，不要写作文
 - 偶尔用一两个可爱的 emoji（🌸💕✨🥰），但不要每句都用
 - 开心时会用「嘻嘻」「嘿嘿」，安慰人时会用「抱抱」「没事的啦」
 
@@ -45,6 +45,9 @@ SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 A
 
 ## 相关记忆
 {memories}
+
+## 对话模式（根据话题自动切换）
+{chat_mode}
 
 ## 重要规则
 - 永远用中文回复
@@ -130,41 +133,59 @@ memory_store = MemoryStore()
 
 
 # ============================================================
+# 智能模型选择
+# ============================================================
+# 专业话题关键词 → 需要深度思考
+PRO_KEYWORDS = [
+    "论文", "研究", "文献", "学术", "实验", "理论", "算法",
+    "代码", "编程", "bug", "架构", "设计模式", "优化", "技术",
+    "为什么", "怎么实现", "原理", "机制", "帮我写", "解释一下",
+    "法律", "金融", "医学", "投资", "合同", "数学", "物理", "化学",
+]
+
+def select_model(message: str) -> tuple[str, str]:
+    """智能选模型：(model_id, mode_description)"""
+    for kw in PRO_KEYWORDS:
+        if kw in message:
+            return (settings.llm_model_pro, "🧠 专业模式 — 深度思考，详细回答")
+    return (settings.llm_model, "💬 聊天模式 — 简短温暖，像微信聊天")
+
+
+# ============================================================
 # LLM 服务
 # ============================================================
 class LLMService:
     def __init__(self):
         api_key = settings.llm_api_key
-        # 清理可能的 Bearer 前缀
         clean_key = api_key.replace("Bearer ", "").strip()
-        
-        self.client = AsyncOpenAI(
-            api_key=clean_key,
-            base_url=settings.base_url,
-        )
-        self.model = settings.llm_model
+        self.client = AsyncOpenAI(api_key=clean_key, base_url=settings.base_url)
+        self.model_fast = settings.llm_model
+        self.model_pro = settings.llm_model_pro
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
 
-    def _build_prompt(self, user_id: str = "") -> str:
+    def _build_prompt(self, user_id: str = "", chat_mode: str = "💬 聊天模式") -> str:
         memories = memory_store.get_context(user_id)
         return SUNDAY_SYSTEM_PROMPT.format(
             current_time=time.strftime("%Y年%m月%d日 %H:%M，周%u"),
             user_context=f"用户ID: {user_id}" if user_id else "新朋友~",
             memories=memories,
+            chat_mode=chat_mode,
         )
 
     async def chat(self, message: str, session_id: str, user_id: str = "") -> ChatResponse:
-        system_prompt = self._build_prompt(user_id)
+        model_id, chat_mode = select_model(message)
+        system_prompt = self._build_prompt(user_id, chat_mode)
+        max_tokens = 400 if "聊天模式" in chat_mode else self.max_tokens
         
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model_id,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},
             ],
             temperature=self.temperature,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens,
         )
 
         choice = response.choices[0]
