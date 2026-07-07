@@ -6,12 +6,13 @@
 
 ## 🎯 是什么
 
-SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 iOS 快捷指令调用，实现语音/文字交互。她拥有**持久记忆系统**和**甜美人格**，能记住你的喜好、行程、项目、习惯，越用越懂你。
+SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 iOS 快捷指令调用，实现语音/文字交互。她拥有**记忆系统**和**甜美人格**，能记住你的喜好、行程、项目、习惯，越用越懂你。
 
 ```
 你 → iOS快捷指令 → SundayOS → 豆包大模型 → 甜美回复
-                         ↓
-                    SQLite 记忆系统
+                         ├── SQLite 记忆系统
+                         ├── DuckDuckGo 网络搜索
+                         └── 对话流上下文
 ```
 
 ---
@@ -22,12 +23,15 @@ SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 i
 |------|------|
 | 🧠 **LLM 智能记忆** | 自动分析每句话，提取有价值的信息并分类存储 |
 | 📋 **12 类记忆分类** | 事实/偏好/行程/关系/目标/习惯/项目/科研/学习/笔记/健康/财务 |
+| 🔥 **对话流短期记忆** | 最近对话上下文，两级衰减（24h完整 + 24-72h摘要） |
 | 🔗 **深度上下文联动** | 聊天时主动联想相关记忆，像老朋友一样自然 |
 | 👤 **动态用户画像** | 自动构建你的个人画像，每次对话都带上下文 |
+| 🌐 **网络搜索** | DuckDuckGo 实时搜索 + LLM 智能整理 |
 | 🎭 **智能模型切换** | 日常聊天用 Character 模型，专业话题自动切 Pro |
 | 💕 **甜美人格** | 温柔、体贴、活泼、偶尔撒娇的 AI 女孩 |
 | 💾 **持久化存储** | Railway Volume 挂载，重启不丢数据 |
 | 🔄 **自动去重** | 同内容不重复存储，自动更新 |
+| ⏳ **记忆衰减** | 低重要性旧记忆自动降权 |
 
 ---
 
@@ -41,13 +45,17 @@ sundayos/
 │   └── app/
 │       ├── config.py       # 配置管理（环境变量）
 │       ├── main.py         # FastAPI 主应用 + 聊天 API
-│       └── memory.py       # SQLite 记忆系统（核心）
-└── README.md
+│       ├── memory.py       # SQLite 记忆系统（核心）
+│       └── search.py       # DuckDuckGo 网络搜索模块
+├── README.md
+├── ARCHITECTURE.md         # 架构详解
+└── DESIGN.md               # 设计思路
 ```
 
-- **框架**: FastAPI + Uvicorn
+- **框架**: FastAPI + Uvicorn (Python 3.11)
 - **LLM**: 字节跳动豆包（Character + Pro 双模型）
 - **存储**: SQLite + Railway Volume
+- **搜索**: DuckDuckGo（免费，无需 API Key）
 - **部署**: Railway（美国西部 sfo 区域）
 
 ---
@@ -86,6 +94,12 @@ X-API-Key: sunday-2026
 }
 ```
 
+### 健康检查
+
+```bash
+GET /health
+```
+
 ### 记忆管理
 
 | 端点 | 方法 | 说明 |
@@ -102,12 +116,6 @@ X-API-Key: sunday-2026
 | `/api/memory/export?user_id=xxx` | GET | 导出所有记忆 |
 | `/api/memory/decay?user_id=xxx` | POST | 触发记忆衰减 |
 
-### 健康检查
-
-```bash
-GET /health
-```
-
 ---
 
 ## 📲 iOS 快捷指令配置
@@ -115,15 +123,18 @@ GET /health
 ### 步骤
 
 1. 新建快捷指令 → 添加「听写文本」或「要求输入」
-2. 添加「获取 URL 内容」：
+2. 添加「词典」：
+   - 键 `message` → 值选「听写文本」**变量**
+   - 键 `session_id` → 值填固定文本 `iphone-daily`（或你的名字）
+3. 添加「获取 URL 内容」：
    - URL: `https://sunday-os-production-1cd2.up.railway.app/api/chat`
    - 方法: `POST`
    - 头部: `X-API-Key` = `sunday-2026`
    - 头部: `Content-Type` = `application/json`
-   - 请求体: `{"message":"[输入的文本]","session_id":"iphone-你的名字"}`
+   - 请求体: 选上一步的「词典」
    - 超时: 30 秒
-3. 添加「获取字典值」：键 = `reply`
-4. 添加「显示结果」和「朗读文本」
+4. 添加「获取字典值」：键 = `reply`
+5. 添加「显示结果」和「朗读文本」
 
 ---
 
