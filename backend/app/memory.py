@@ -132,6 +132,7 @@ def init_db():
 
 def _migrate(conn: sqlite3.Connection):
     """自动检测并添加缺失的列"""
+    # memories 表迁移
     existing = {row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
     migrations = {
         "summary": "TEXT DEFAULT ''",
@@ -141,6 +142,16 @@ def _migrate(conn: sqlite3.Connection):
     for col, col_type in migrations.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {col_type}")
+
+    # feedback 表迁移
+    fb_existing = {row[1] for row in conn.execute("PRAGMA table_info(feedback)").fetchall()}
+    fb_migrations = {
+        "ai_category": "TEXT DEFAULT ''",
+        "priority": "TEXT DEFAULT 'medium'",
+    }
+    for col, col_type in fb_migrations.items():
+        if col not in fb_existing:
+            conn.execute(f"ALTER TABLE feedback ADD COLUMN {col} {col_type}")
 
 
 # ============================================================

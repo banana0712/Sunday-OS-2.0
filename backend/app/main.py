@@ -1183,10 +1183,30 @@ async def get_feedback(
     status: str = Query("open"),
     limit: int = Query(50),
 ):
-    """获取改进计划列表（快捷指令用）"""
+    """获取改进计划列表"""
     await verify_key(request)
     items = memory_store.get_feedback(user_id, status=status, limit=limit)
     return {"count": len(items), "items": items}
+
+
+@app.post("/api/feedback/add")
+async def add_feedback_api(request: Request):
+    """添加改进计划"""
+    await verify_key(request)
+    body = await request.json()
+    user_id = body.get("user_id", "daily")
+    title = body.get("title", "")
+    fb_type = body.get("fb_type", "improvement")
+    detail = body.get("detail", "")
+    ai_category = body.get("ai_category", "")
+    priority = body.get("priority", "medium")
+
+    if not title:
+        raise HTTPException(400, "title 不能为空呢~")
+
+    fb_id = memory_store.add_feedback(user_id, fb_type, title, detail,
+                                       ai_category=ai_category, priority=priority)
+    return {"status": "added", "fb_id": fb_id}
 # force rebuild Thu Jul  9 02:08:18 AM CST 2026
 
 # deploy 1783536301
