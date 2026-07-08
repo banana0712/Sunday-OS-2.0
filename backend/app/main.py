@@ -1221,6 +1221,23 @@ tr:hover {{ background: #fff8fa; }}
 .card {{ flex:1;min-width:280px;background:white;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,0.04);overflow:hidden; }}
 .card-title {{ padding:14px 18px 0;font-size:14px;font-weight:700;color:#5a3a4a; }}
 .card-body {{ padding:14px 18px;font-size:13px;color:#4a3a3a;line-height:1.8;max-height:300px;overflow-y:auto; }}
+
+/* 移动端适配 */
+@media (max-width: 640px) {{
+  body {{ padding: 10px; }}
+  .header {{ padding: 16px; border-radius: 12px; }}
+  .header h1 {{ font-size: 20px; }}
+  .tabs {{ gap: 2px; }}
+  .tab {{ padding: 8px 6px; font-size: 11px; }}
+  .stats {{ gap: 8px; }}
+  .stat {{ padding: 12px 8px; min-width: 60px; }}
+  .stat .num {{ font-size: 22px; }}
+  .card-grid {{ flex-direction: column; }}
+  .card {{ min-width: 100%; }}
+  table {{ display: block; overflow-x: auto; white-space: nowrap; }}
+  th, td {{ padding: 8px 10px; font-size: 11px; }}
+  .btn-sm {{ padding: 3px 6px; font-size: 12px; }}
+}}
 </style>
 </head>
 <body>
