@@ -1085,14 +1085,85 @@ async def dashboard(request: Request):
     if not mem_html:
         mem_html = '<tr><td colspan="7" style="text-align:center;color:#999;padding:30px;">暂无活跃记忆</td></tr>'
 
+    # ── 用户画像（从记忆自动聚合）──
+    profile_parts = []
+    facts = memory_store.search("daily", category="fact", limit=5)
+    prefs = memory_store.search("daily", category="preference", limit=5)
+    rels = memory_store.search("daily", category="relationship", limit=3)
+    for f in facts:
+        profile_parts.append(f.get("summary", f["content"]))
+    for p in prefs:
+        profile_parts.append(p.get("summary", p["content"]))
+    for r in rels:
+        profile_parts.append(r.get("summary", r["content"]))
+    profile_html = "<br>".join([f"· {p}" for p in profile_parts[:10]]) if profile_parts else "Sunday 还在慢慢了解你呢~"
+
+    # ── 最近对话 ──
+    chat_items = memory_store.get_conversation_context("daily", max_turns=10)
+    chat_lines = chat_items.split("\n") if chat_items else []
+    chat_html = ""
+    for line in chat_lines[-8:]:
+        line = line.strip()
+        if not line:
+            continue
+        role = "💬" if line.startswith("用户:") else "💕" if line.startswith("Sunday:") else ""
+        chat_html += f'<div style="padding:6px 0;font-size:12px;border-bottom:1px solid #f5f5f5;">{role} {line[:120]}</div>'
+    if not chat_html:
+        chat_html = '<div style="text-align:center;color:#999;padding:20px;">暂无对话记录</div>'
+
+    # ── 推送状态 ──
+    push_count = memory_store.get_daily_push_count("daily")
+    knowledge_count = memory_store.get_today_knowledge_count("daily")
+
     tabs_html = f"""
     <div class="tabs">
-        <a href="?key={key}&tab=logs" class="tab {'active' if tab=='logs' else ''}">📊 运行日志</a>
-        <a href="?key={key}&tab=feedback" class="tab {'active' if tab=='feedback' else ''}">📝 改进计划 ({len(fb_items)})</a>
+        <a href="?key={key}&tab=overview" class="tab {'active' if tab=='overview' else ''}">🏠 总览</a>
         <a href="?key={key}&tab=memory" class="tab {'active' if tab=='memory' else ''}">🧠 记忆 ({len(mem_items)})</a>
+        <a href="?key={key}&tab=feedback" class="tab {'active' if tab=='feedback' else ''}">📝 计划 ({len(fb_items)})</a>
+        <a href="?key={key}&tab=logs" class="tab {'active' if tab=='logs' else ''}">📊 日志</a>
     </div>"""
-    
+
+    # ── 总览页 ──
+    overview = f"""<div class="stats">
+        <div class="stat"><div class="num">{len(mem_items)}</div><div class="label">活跃记忆</div></div>
+        <div class="stat"><div class="num">{len(fb_items)}</div><div class="label">待改进</div></div>
+        <div class="stat"><div class="num">{push_count}</div><div class="label">今日推送</div></div>
+        <div class="stat"><div class="num">{knowledge_count}</div><div class="label">今日知识</div></div>
+        <div class="stat"><div class="num">{s['today']['total']}</div><div class="label">今日消息</div></div>
+    </div>
+
+    <div class="card-grid">
+    <div class="card">
+    <div class="card-title">🧬 Sunday 眼中的你</div>
+    <div class="card-body" style="line-height:2;">{profile_html}</div>
+    </div>
+    <div class="card">
+    <div class="card-title">💬 最近对话</div>
+    <div class="card-body">{chat_html}</div>
+    </div>
+    </div>"""
+
     content = {
+        "overview": overview,
+
+        "memory": f"""<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+            <span style="font-size:13px;color:#666;">共 {len(mem_items)} 条</span>
+            <input id="memInput" placeholder="新增记忆..." style="flex:1;padding:6px 10px;border:1px solid #f0c0d0;border-radius:8px;font-size:12px;outline:none;"
+                   onkeypress="if(event.key==='Enter')addMem()">
+            <button onclick="addMem()" class="btn-sm" style="padding:6px 12px;background:#ff6b8a;color:white;border:none;border-radius:8px;font-size:12px;cursor:pointer;">+</button>
+            <a href="/api/memory/export/csv?user_id=daily&key={key}" download 
+               style="padding:6px 14px;background:#fff0f3;color:#ff6b8a;border-radius:8px;text-decoration:none;font-size:12px;">📥 导出</a>
+        </div>
+        <table><tr><th>状态</th><th>分类</th><th>摘要</th><th>重要性</th><th>访问</th><th>ID</th><th>操作</th></tr>{mem_html}</table>""",
+
+        "feedback": f"""<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+            <span style="font-size:13px;color:#666;">共 {len(fb_items)} 条</span>
+            <input id="planInput" placeholder="快速添加..." style="flex:1;padding:6px 10px;border:1px solid #f0c0d0;border-radius:8px;font-size:12px;outline:none;"
+                   onkeypress="if(event.key==='Enter')addPlan()">
+            <button onclick="addPlan()" class="btn-sm" style="padding:6px 12px;background:#ff6b8a;color:white;border:none;border-radius:8px;font-size:12px;cursor:pointer;">+</button>
+        </div>
+        <table><tr><th>类型</th><th>标题</th><th>分类/优先级</th><th>日期</th><th>操作</th></tr>{fb_html}</table>""",
+
         "logs": f"""<div class="stats">
             <div class="stat"><div class="num">{s['today']['total']}</div><div class="label">今日消息</div></div>
             <div class="stat"><div class="num">{s['today']['errors']}</div><div class="label">今日错误</div></div>
@@ -1101,32 +1172,14 @@ async def dashboard(request: Request):
             <div class="stat"><div class="num">{len(fb_items)}</div><div class="label">待改进</div></div>
         </div>
         <table><tr><th>类型</th><th>来源</th><th>内容</th><th>时间</th></tr>{logs_html}</table>""",
-        
-        "feedback": f"""<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
-            <span style="font-size:13px;color:#666;">共 {len(fb_items)} 条计划</span>
-            <input id="planInput" placeholder="快速添加计划..." style="flex:1;padding:6px 10px;border:1px solid #f0c0d0;border-radius:8px;font-size:12px;outline:none;"
-                   onkeypress="if(event.key==='Enter')addPlan()">
-            <button onclick="addPlan()" class="btn-sm" style="padding:6px 12px;background:#ff6b8a;color:white;border:none;border-radius:8px;font-size:12px;cursor:pointer;">+</button>
-        </div>
-        <table><tr><th>类型</th><th>标题</th><th>分类/优先级</th><th>日期</th><th>操作</th></tr>{fb_html}</table>""",
-        
-        "memory": f"""<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
-            <span style="font-size:13px;color:#666;">共 {len(mem_items)} 条记忆</span>
-            <input id="memInput" placeholder="新增记忆摘要..." style="flex:1;padding:6px 10px;border:1px solid #f0c0d0;border-radius:8px;font-size:12px;outline:none;"
-                   onkeypress="if(event.key==='Enter')addMem()">
-            <button onclick="addMem()" class="btn-sm" style="padding:6px 12px;background:#ff6b8a;color:white;border:none;border-radius:8px;font-size:12px;cursor:pointer;">+</button>
-            <a href="/api/memory/export/csv?user_id=daily&key={key}" download 
-               style="padding:6px 14px;background:#fff0f3;color:#ff6b8a;border-radius:8px;text-decoration:none;font-size:12px;">📥 导出</a>
-        </div>
-        <table><tr><th>状态</th><th>分类</th><th>摘要</th><th>重要性</th><th>访问</th><th>ID</th><th>操作</th></tr>{mem_html}</table>""",
-    }[tab]
+    }.get(tab, overview)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sunday Admin</title>
+<title>SundayOS 控制台</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ font-family: -apple-system, 'PingFang SC', sans-serif; background: #fef9f4; color: #333; padding: 20px; }}
@@ -1164,14 +1217,17 @@ tr:hover {{ background: #fff8fa; }}
 .pri-low {{ background:#e8f5e9;color:#2e7d32; }}
 .toast {{ position:fixed;bottom:20px;right:20px;background:#333;color:white;padding:10px 20px;border-radius:10px;font-size:13px;opacity:0;transition:opacity 0.3s;z-index:999; }}
 .toast.show {{ opacity:1; }}
+.card-grid {{ display:flex;gap:14px;margin-bottom:14px;flex-wrap:wrap; }}
+.card {{ flex:1;min-width:280px;background:white;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,0.04);overflow:hidden; }}
+.card-title {{ padding:14px 18px 0;font-size:14px;font-weight:700;color:#5a3a4a; }}
+.card-body {{ padding:14px 18px;font-size:13px;color:#4a3a3a;line-height:1.8;max-height:300px;overflow-y:auto; }}
 </style>
 </head>
 <body>
 <div id="toast" class="toast"></div>
 <div class="header">
-    <h1>💕 Sunday Admin</h1>
-    <p>记忆管理 · 改进计划 · 运行日志 | v3.1</p>
-    <p>开发者面板</p>
+    <h1>💕 SundayOS 控制台</h1>
+    <p>总览 · 记忆 · 计划 · 日志 | v3.2</p>
 </div>
 {tabs_html}
 {content}
