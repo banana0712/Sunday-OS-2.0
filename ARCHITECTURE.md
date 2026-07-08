@@ -1,6 +1,6 @@
 ╔══════════════════════════════════════════════════════════════╗
 ║            SundayOS 项目架构与原理详解                         ║
-║            v2.0 — 不只是助手，是伙伴                           ║
+║            v3.0 — 工作伙伴 + 知识成长系统                       ║
 ╚══════════════════════════════════════════════════════════════╝
 
 ═══════════════════════════════════════════════════════════════
@@ -8,25 +8,37 @@
 ═══════════════════════════════════════════════════════════════
 
 SundayOS 是一个个人 AI 助手后端服务，部署在 Railway 云平台，
-通过 REST API 为 iOS 快捷指令提供对话服务。
+通过 REST API + Telegram Bot + 邮件推送为 iOS 快捷指令和 Telegram 提供多通道对话服务。
 
 核心栈：
   - Web 框架：FastAPI (Python 3.11)
   - LLM 引擎：字节跳动豆包 (火山引擎)，OpenAI 兼容 API
   - 存储引擎：SQLite 3 + WAL 模式
   - 搜索引擎：DuckDuckGo (免费，无需 API Key)
+  - 邮件推送：Resend HTTP API + iCloud IMAP
+  - 即时通讯：python-telegram-bot
+  - 文档生成：python-docx
+  - 图表生成：matplotlib
   - 容器化：Docker + Railway 自动构建
   - 持久化：Railway Volume (挂载 /app/data)
 
 项目结构：
   backend/
-  ├── Dockerfile           # 容器定义
-  ├── requirements.txt     # 依赖：fastapi, uvicorn, openai, ddgs, pydantic
+  ├── Dockerfile              # 容器定义
+  ├── requirements.txt        # 依赖
+  ├── CHANGELOG.md            # 开发日志
   └── app/
-      ├── config.py        # Settings 类，读取环境变量
-      ├── main.py          # 主应用：路由、人设、LLM 调用、记忆提取、搜索调度
-      ├── memory.py        # 记忆系统：SQLite CRUD、检索、衰减、对话流
-      └── search.py        # 网络搜索：DuckDuckGo 搜索 + 结果格式化
+      ├── config.py           # Settings 类，读取环境变量
+      ├── main.py             # 主应用：路由、人设、LLM 调用、记忆提取、搜索调度
+      ├── memory.py           # 记忆系统：SQLite CRUD、检索、衰减、对话流、知识库
+      ├── search.py           # 网络搜索：DuckDuckGo 搜索 + 结果格式化
+      ├── mailer.py           # 邮件推送：Resend API + 三层推送体系 + AI 设计
+      ├── imap_listener.py    # iCloud IMAP 邮件监听（15秒轮询）
+      ├── telegram_bot.py     # Telegram Bot：聊天 + 命令 + 文件发送
+      ├── email_templates.py  # AI 邮件设计引擎：6主题×4布局×3装饰
+      ├── file_generator.py   # Word/图表生成 + 免费配图
+      ├── knowledge_push.py   # 知识推送引擎：搜索+生成+推送决策
+      └── logger.py           # 日志系统：SQLite 存储 + Dashboard
 
 ═══════════════════════════════════════════════════════════════
 二、记忆系统架构（核心）

@@ -6,13 +6,16 @@
 
 ## 🎯 是什么
 
-SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 iOS 快捷指令调用，实现语音/文字交互。她拥有**记忆系统**和**甜美人格**，能记住你的喜好、行程、项目、习惯，越用越懂你。
+SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 iOS 快捷指令 + Telegram Bot + 邮件推送，实现多通道交互。她拥有**记忆系统**、**AI 设计引擎**、**知识推送**和**甜美人格**，能记住你的喜好、帮你写报告、推送知识、像真人一样分段聊天。
 
 ```
-你 → iOS快捷指令 → SundayOS → 豆包大模型 → 甜美回复
-                         ├── SQLite 记忆系统
+你 → iOS快捷指令 / Telegram / 邮件 → SundayOS → 豆包大模型 → 甜美回复
+                         ├── SQLite 记忆系统（质量过滤）
                          ├── DuckDuckGo 网络搜索
-                         └── 对话流上下文
+                         ├── AI 原生邮件设计引擎
+                         ├── Word 报告生成（python-docx）
+                         ├── 知识推送（科学/时事/词条）
+                         └── 对话流上下文 + 智能分段
 ```
 
 ---
@@ -21,9 +24,12 @@ SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 i
 
 | 能力 | 说明 |
 |------|------|
-| 🧠 **LLM 智能记忆** | 自动分析每句话，提取有价值的信息并分类存储 |
+| 🧠 **LLM 智能记忆** | 自动分析每句话，质量过滤，提取有价值的信息并分类存储 |
 | 📋 **12 类记忆分类** | 事实/偏好/行程/关系/目标/习惯/项目/科研/学习/笔记/健康/财务 |
-| 🔥 **对话流短期记忆** | 最近对话上下文，两级衰减（24h完整 + 24-72h摘要） |
+| 🎨 **AI 邮件设计引擎** | 每封邮件由 LLM 自由创作配色/布局/装饰，独一无二 |
+| 📝 **Word 报告生成** | 学术/简洁双风格，LLM 搜索+大纲+逐章撰写 |
+| 📚 **知识推送** | 科学趣闻/今日词条/思维火花/灵感碎片/时事速览 |
+| 💬 **智能分段聊天** | AI 自主判断何时分多条消息，有呼吸感 |
 | 🔗 **深度上下文联动** | 聊天时主动联想相关记忆，像老朋友一样自然 |
 | 👤 **动态用户画像** | 自动构建你的个人画像，每次对话都带上下文 |
 | 🌐 **网络搜索** | DuckDuckGo 实时搜索 + LLM 智能整理 |
@@ -32,6 +38,10 @@ SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 i
 | 💾 **持久化存储** | Railway Volume 挂载，重启不丢数据 |
 | 🔄 **自动去重** | 同内容不重复存储，自动更新 |
 | ⏳ **记忆衰减** | 低重要性旧记忆自动降权 |
+| 🛡️ **记忆质量过滤** | 自动过滤反问句/不完整/垃圾信息 |
+| 📊 **周报自动生成** | 每周日晚推送数据报告 |
+| 🤖 **Telegram Bot** | 实时聊天 + 文件发送 + 命令系统 |
+| ✉️ **邮件推送** | 精美 HTML 邮件 + 附件 + IMAP 监听 |
 
 ---
 
@@ -40,22 +50,34 @@ SundayOS 是一个个人 AI 助手后端服务，专为 iPhone 设计。通过 i
 ```
 sundayos/
 ├── backend/
-│   ├── Dockerfile          # Docker 镜像定义
-│   ├── requirements.txt    # Python 依赖
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── CHANGELOG.md          # 开发日志
 │   └── app/
-│       ├── config.py       # 配置管理（环境变量）
-│       ├── main.py         # FastAPI 主应用 + 聊天 API
-│       ├── memory.py       # SQLite 记忆系统（核心）
-│       └── search.py       # DuckDuckGo 网络搜索模块
+│       ├── config.py          # 配置管理
+│       ├── main.py            # FastAPI 主应用 + 聊天 API
+│       ├── memory.py          # SQLite 记忆系统（核心）
+│       ├── search.py          # DuckDuckGo 网络搜索
+│       ├── mailer.py          # 邮件推送引擎（Resend API）
+│       ├── imap_listener.py   # iCloud IMAP 邮件监听
+│       ├── telegram_bot.py    # Telegram Bot
+│       ├── email_templates.py # AI 邮件设计引擎
+│       ├── file_generator.py  # Word/图表生成
+│       ├── knowledge_push.py  # 知识推送系统
+│       └── logger.py          # 日志系统
 ├── README.md
-├── ARCHITECTURE.md         # 架构详解
-└── DESIGN.md               # 设计思路
+├── ARCHITECTURE.md
+├── DESIGN.md
+└── CHANGELOG.md
 ```
 
 - **框架**: FastAPI + Uvicorn (Python 3.11)
 - **LLM**: 字节跳动豆包（Character + Pro 双模型）
 - **存储**: SQLite + Railway Volume
 - **搜索**: DuckDuckGo（免费，无需 API Key）
+- **邮件**: Resend HTTP API + iCloud IMAP
+- **聊天**: python-telegram-bot
+- **文档**: python-docx
 - **部署**: Railway（美国西部 sfo 区域）
 
 ---
@@ -79,18 +101,7 @@ X-API-Key: sunday-2026
 
 {
   "message": "你好呀，我叫小明",
-  "session_id": "iphone-xiaoming"
-}
-```
-
-响应：
-```json
-{
-  "reply": "小明你好呀～很高兴认识你呢！✨",
-  "session_id": "iphone-xiaoming",
-  "tokens_used": 350,
-  "model": "ep-m-20260707225516-zws7x",
-  "memories_stored": 1
+  "session_id": "iphone-daily"
 }
 ```
 
@@ -104,72 +115,54 @@ GET /health
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/memory/stats?user_id=xxx` | GET | 记忆统计（按分类/重要性/标签） |
-| `/api/memory?user_id=xxx` | GET | 列出记忆（支持分类/重要性筛选） |
+| `/api/memory?user_id=xxx` | GET | 列出记忆 |
 | `/api/memory` | POST | 手动添加记忆 |
-| `/api/memory/search` | POST | 关键词搜索记忆 |
-| `/api/memory/{id}` | PUT | 更新记忆 |
 | `/api/memory/{id}` | DELETE | 删除记忆 |
-| `/api/memory/{id}/archive` | POST | 归档记忆 |
-| `/api/memory/{id}/linked` | GET | 查看关联记忆 |
-| `/api/memory/link` | POST | 手动关联两条记忆 |
-| `/api/memory/export?user_id=xxx` | GET | 导出所有记忆 |
-| `/api/memory/decay?user_id=xxx` | POST | 触发记忆衰减 |
+| `/api/memory/{id}/archive` | POST | 归档/恢复记忆 |
+| `/api/memory/export?user_id=xxx` | GET | 导出 JSON |
+| `/api/memory/export/csv?user_id=xxx` | GET | 导出 CSV |
+
+### 推送
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/push/pending?user_id=xxx` | GET | 检查是否有待推送消息 |
+| `/api/push/send` | POST | 手动触发推送 |
+| `/api/push/test-llm` | POST | 测试 LLM 推送生成 |
+
+### 报告
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/generate/report` | POST | 生成 Word 报告 |
+
+### Dashboard
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/dashboard?key=xxx&tab=logs` | GET | 运行日志 |
+| `/dashboard?key=xxx&tab=feedback` | GET | 改进计划 |
+| `/dashboard?key=xxx&tab=memory` | GET | 记忆管理 |
 
 ---
 
-## 📲 iOS 快捷指令配置
+## 📲 多通道交互
 
-### 步骤
-
-1. 新建快捷指令 → 添加「听写文本」或「要求输入」
-2. 添加「词典」：
-   - 键 `message` → 值选「听写文本」**变量**
-   - 键 `session_id` → 值填固定文本 `iphone-daily`（或你的名字）
-3. 添加「获取 URL 内容」：
-   - URL: `https://sunday-os-production-1cd2.up.railway.app/api/chat`
-   - 方法: `POST`
-   - 头部: `X-API-Key` = `sunday-2026`
-   - 头部: `Content-Type` = `application/json`
-   - 请求体: 选上一步的「词典」
-   - 超时: 30 秒
-4. 添加「获取字典值」：键 = `reply`
-5. 添加「显示结果」和「朗读文本」
+| 通道 | 方式 | 说明 |
+|------|------|------|
+| 📱 **快捷指令** | `POST /api/chat` | iOS 语音/文字输入 |
+| 🤖 **Telegram** | `@Sunday_OS_bot` | 实时聊天 + `/report` + `/memory` |
+| ✉️ **邮件** | `sunday_os@icloud.com` | 精美推送 + 回复对话 |
 
 ---
 
 ## 🔧 部署
 
-### 环境变量
-
-| 变量 | 说明 |
-|------|------|
-| `SUNDAY_API_KEY` | API 认证密钥 |
-| `LLM_API_KEY` | 豆包 API Key |
-| `LLM_MODEL` | 聊天模型 endpoint ID |
-| `LLM_MODEL_PRO` | 专业模型 endpoint ID |
-| `LLM_TEMPERATURE` | 生成温度 (0.0-1.0) |
-| `LLM_MAX_TOKENS` | 最大输出 token 数 |
-
-### 一键部署
-
 ```bash
 cd backend
-railway up --detach
+railway up --service sunday-os --environment production
 ```
 
 ---
 
-## 📊 记忆系统详解
-
-详见 [`ARCHITECTURE.md`](./ARCHITECTURE.md) — 包含完整的数据库 Schema、数据流、检索算法说明。
-
----
-
-## 🎨 设计理念
-
-详见 [`DESIGN.md`](./DESIGN.md) — Sunday 的人格设计、交互哲学和成长愿景。
-
----
-
-**SundayOS v2.0** — 你的外置大脑，你的甜心伙伴 💕
+**SundayOS v3.0** — 你的外置大脑，你的甜心伙伴 💕
