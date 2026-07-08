@@ -1234,9 +1234,9 @@ tr:hover {{ background: #fff8fa; }}
   .stat .num {{ font-size: 22px; }}
   .card-grid {{ flex-direction: column; }}
   .card {{ min-width: 100%; }}
-  table {{ display: block; overflow-x: auto; white-space: nowrap; }}
+  table {{ display: block; overflow-x: auto; }}
   th, td {{ padding: 8px 10px; font-size: 11px; }}
-  td {{ max-width: 140px; overflow: hidden; text-overflow: ellipsis; }}
+  td {{ white-space: normal; word-break: break-word; }}
   .btn-sm {{ padding: 3px 6px; font-size: 12px; }}
 }}
 </style>
