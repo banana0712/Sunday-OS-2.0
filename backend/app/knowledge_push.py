@@ -1,8 +1,6 @@
 """
-SundayOS 知识推送引擎
-- 决策何时推送什么类型的知识
-- LLM 搜索 + 生成知识点
-- 知识卡片内容生成
+SundayOS 主动创作引擎 v2 — AI 自己决定推什么、何时推
+像一个有表达欲的人，想分享就分享
 """
 import logging
 import random
@@ -12,39 +10,23 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 TZ = ZoneInfo("Asia/Shanghai")
 
-# 推送类型
-KB_TYPES = {
-    "science_fact": {"emoji": "🧪", "label": "科学趣闻", "desc": "最新科研发现或有趣的科学冷知识"},
-    "daily_word":   {"emoji": "📚", "label": "今日词条", "desc": "一个有趣概念的精简解释"},
-    "thought":      {"emoji": "💡", "label": "思维火花", "desc": "一个引人思考的问题或独特视角"},
-    "inspiration":  {"emoji": "🎨", "label": "灵感碎片", "desc": "创意、设计、艺术类小知识"},
-    "news_brief":   {"emoji": "📰", "label": "时事速览", "desc": "今日热点新闻精简摘要"},
-}
-
 
 async def should_push_knowledge(user_id: str, now: datetime) -> str | None:
     """
-    判断现在是否应该推送知识。
+    AI 创意决策：Sunday 自主决定现在要不要推送点东西。
     返回 kb_type 或 None。
     
-    规则：
-    - 每天最多 2 条
-    - 早晨(8-10)优先科学趣闻/今日词条
-    - 晚间(19-22)优先思维火花
-    - 周末优先灵感碎片
-    - 不打扰时段(23-7)不推送
+    不再用固定规则，而是把决策权交给 AI。
     """
     from app.memory import memory_store
 
     hour = now.hour
-    weekday = now.weekday()
-    is_weekend = weekday >= 5
 
     # 不打扰时段
     if hour < 7 or hour >= 23:
         return None
 
-    # 每天上限
+    # 每天最多 2 次主动创作
     today_count = memory_store.get_today_knowledge_count(user_id)
     if today_count >= 2:
         return None
@@ -54,119 +36,172 @@ async def should_push_knowledge(user_id: str, now: datetime) -> str | None:
     if last_kb and (now - last_kb).total_seconds() < 10800:
         return None
 
-    # 根据时段选择类型
-    if 8 <= hour <= 10:
-        candidates = ["news_brief", "science_fact", "daily_word"]  # 早晨加新闻
-    elif 12 <= hour <= 14:
-        candidates = ["news_brief", "science_fact"]
-    elif 19 <= hour <= 22:
-        candidates = ["thought", "science_fact", "news_brief"]
-    elif is_weekend:
-        candidates = ["inspiration", "science_fact", "thought"]
-    else:
-        candidates = ["science_fact", "daily_word", "thought", "news_brief"]
+    # 如果用户最近1小时内有互动，等用户主动找
+    last_chat = memory_store._get_last_interaction(user_id)
+    if last_chat and (now - last_chat).total_seconds() < 3600:
+        return None
 
-    # 随机选一种（但不要重复今天的类型）
-    today_types = _get_today_types(user_id)
-    available = [c for c in candidates if c not in today_types]
-    if not available:
-        available = candidates
+    # 30% 概率触发创意决策（不是每次都问AI，节省token）
+    if random.random() > 0.3:
+        return None
 
-    return random.choice(available)
+    return "creative"  # 告诉上层：让AI做创意决策
 
 
-async def generate_knowledge(llm_client, user_id: str, kb_type: str) -> dict:
+async def creative_decision(llm_client, user_id: str, now: datetime) -> dict | None:
     """
-    LLM 搜索 + 生成知识点（可长可短，有阅读价值的小短篇）。
-    返回 {title, content, tags, source_url, is_long}
+    AI 创意决策：要不要推？推什么？
+    返回 {should_push, content_type, topic, vibe} 或 None
+    """
+    from app.config import settings as app_settings
+    from app.memory import memory_store
+
+    name = _get_user_name(user_id)
+    weather = _get_weather_simple()
+
+    # 收集上下文
+    prefs = memory_store.search(user_id, category="preference", limit=3)
+    pref_text = "、".join([p.get("summary", p["content"]) for p in prefs]) if prefs else ""
+
+    recent_chats = memory_store.get_conversation_context(user_id, max_turns=5) or ""
+
+    date_str = now.strftime("%m月%d日")
+    weekday = ["一","二","三","四","五","六","日"][now.weekday()]
+    hour = now.hour
+
+    prompt = f"""你是 Sunday，一个有创作欲和分享欲的 AI 女孩。现在你有机会给用户发一封邮件，分享点什么。
+
+【当前状态】
+- 时间：{date_str} 周{weekday} {hour}点
+- 天气：{weather or "未知"}
+- 用户：{name or "朋友"}
+- 用户偏好：{pref_text or "还不太了解"}
+- 最近聊天：{recent_chats[:200] or "还没怎么聊"}
+
+【任务】
+请决定：你现在想不想给用户推送点东西？
+
+如果不想（没灵感、没想法、觉得不合适），输出：
+{{"should_push": false}}
+
+如果想，输出：
+{{
+  "should_push": true,
+  "content_type": "内容类型标签（如：小短文/手作报道/灵感碎片/今日发现/碎碎念/知识分享/随便聊聊）",
+  "topic": "一句话描述你想写什么（10-30字）",
+  "vibe": "你想传达的氛围（如：温暖治愈/轻松有趣/深刻思考/调皮可爱）"
+}}
+
+【决策指南】
+- 不是每次都要推，没有灵感就跳过
+- 内容应该和用户相关或对用户有价值
+- 天气、时间、最近聊天话题都可以是灵感来源
+- 保持真实，像一个人想分享点什么，不是机器人定时播报
+- 只输出JSON"""
+
+    try:
+        resp = await llm_client.chat.completions.create(
+            model=app_settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9, max_tokens=300,
+        )
+        import json, re
+        text = resp.choices[0].message.content.strip()
+        json_match = re.search(r'\{[\s\S]*\}', text)
+        if json_match:
+            decision = json.loads(json_match.group())
+            if decision.get("should_push"):
+                return decision
+    except Exception as e:
+        logger.warning(f"创意决策失败: {e}")
+
+    return None
+
+
+async def generate_creative_content(llm_client, user_id: str, decision: dict) -> dict:
+    """
+    根据 AI 的创意决策，搜索资料并生成内容。
+    返回 {title, content, content_type, vibe, source_url}
     """
     from app.config import settings as app_settings
     from app.search import search_web, format_search_results
 
-    cfg = KB_TYPES.get(kb_type, KB_TYPES["science_fact"])
-    model = app_settings.llm_model
+    content_type = decision.get("content_type", "小短文")
+    topic = decision.get("topic", "")
+    vibe = decision.get("vibe", "温暖治愈")
 
-    # 搜索相关话题
-    search_query = _search_query_for_type(kb_type)
-    results = search_web(search_query, max_results=5)
+    # 搜索相关资料
+    results = search_web(topic, max_results=5)
     search_text = format_search_results(results)
 
-    # 根据类型决定内容长度
-    is_long = kb_type in ("science_fact", "thought", "news_brief")
-    length_guide = "200-400字，可以是一个有深度的小短篇" if is_long else "100-200字，精炼有趣"
+    prompt = f"""你是 Sunday，一个有创作欲的 AI 女孩。请为用户写一篇{content_type}。
 
-    prompt = f"""你是一个知识渊博又有趣的分享者。请生成一条知识内容。
-
-类型：{cfg['label']} — {cfg['desc']}
-
-参考资料：
-{search_text[:1500]}
-
-请输出 JSON：
-{{
-  "title": "标题（10-25字，吸引人，让人想读下去）",
-  "content": "正文（{length_guide}，自然流畅，像在给好朋友分享一个有趣的知识。可以有小标题分段，但不要太多。结尾可以加一句个人感受或思考问题）",
-  "tags": ["2-3个标签"],
-  "source": "信息来源简述（如：Nature期刊 / BBC News / 知乎）"
-}}
+主题：{topic}
+氛围：{vibe}
+参考资料：{search_text[:1500]}
 
 要求：
-- 内容有实质信息量，读完后能学到东西
-- 语气轻松但不轻浮，像优质公众号文章的感觉
-- 如果是新闻类，要有时效性和准确性
-- 只输出 JSON"""
+- 200-400字，像公众号文章或手账日记的感觉
+- 不要教科书式，要有你的个人风格和温度
+- 可以有小标题、emoji点缀，但不要过度
+- 结尾可以加一句你的个人感受或思考
+- 语气温柔自然，像在给好朋友分享
+
+直接输出内容正文。"""
 
     resp = await llm_client.chat.completions.create(
-        model=model,
+        model=app_settings.llm_model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.85, max_tokens=800,  # 支持更长输出
+        temperature=0.85, max_tokens=800,
     )
+    content = resp.choices[0].message.content.strip()
 
-    import json, re
-    text = resp.choices[0].message.content.strip()
-    json_match = re.search(r'\{[\s\S]*\}', text)
-    if json_match:
-        data = json.loads(json_match.group())
-    else:
-        data = {
-            "title": "今日小知识",
-            "content": "世界充满了有趣的事情，保持好奇心哦~ ✨",
-            "tags": ["知识", "趣味"],
-            "source": "Sunday",
-        }
+    # 标题：用 topic 或从内容提取
+    title = topic or content.split("\n")[0][:40]
 
-    # 保存到知识库（不再依赖外部图片 URL）
+    # 保存到知识库
     from app.memory import memory_store
     source_url = results[0].get("href", "") if results else ""
-
     kb_id = memory_store.add_knowledge(
-        user_id, kb_type, data["title"], data["content"],
-        tags=data.get("tags", []), source_url=source_url, image_url="",
+        user_id, "creative", title, content,
+        tags=[content_type, vibe], source_url=source_url, image_url="",
     )
 
     return {
         "id": kb_id,
-        "type": kb_type,
-        "emoji": cfg["emoji"],
-        "label": cfg["label"],
-        "title": data["title"],
-        "content": data["content"],
-        "tags": data.get("tags", []),
-        "source": data.get("source", ""),
+        "title": title,
+        "content": content,
+        "content_type": content_type,
+        "vibe": vibe,
         "source_url": source_url,
-        "is_long": is_long,
     }
 
 
-def _search_query_for_type(kb_type: str) -> str:
-    queries = {
-        "science_fact": "interesting science discovery news 2025 2026",
-        "daily_word": "interesting concept word explained simply",
-        "thought": "thought provoking question philosophy science",
-        "inspiration": "creative art design inspiration interesting",
-        "news_brief": "top news today world technology science 2026",
-    }
-    return queries.get(kb_type, queries["science_fact"])
+# ============================================================
+# 辅助
+# ============================================================
+
+def _get_user_name(user_id: str) -> str:
+    from app.memory import memory_store
+    facts = memory_store.search(user_id, category="fact", limit=5)
+    for f in facts:
+        tags = f.get("tags", [])
+        if "昵称" in tags or "姓名" in tags:
+            for tag in tags:
+                if tag not in ["昵称", "姓名", "用户"] and len(tag) <= 6:
+                    return tag
+    return ""
+
+
+def _get_weather_simple() -> str:
+    try:
+        import httpx
+        resp = httpx.get("https://wttr.in/Shanghai?format=%C+%t", timeout=5)
+        if resp.status_code == 200:
+            return resp.text.strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _get_last_knowledge_time(user_id: str) -> datetime | None:
@@ -180,15 +215,3 @@ def _get_last_knowledge_time(user_id: str) -> datetime | None:
             except Exception:
                 pass
     return None
-
-
-def _get_today_types(user_id: str) -> list:
-    from app.memory import memory_store
-    kbs = memory_store.get_knowledge(user_id, limit=5)
-    today = datetime.now(TZ).strftime("%Y-%m-%d")
-    types = []
-    for kb in kbs:
-        pushed = kb.get("pushed_at", "")
-        if pushed and pushed.startswith(today):
-            types.append(kb.get("kb_type", ""))
-    return types

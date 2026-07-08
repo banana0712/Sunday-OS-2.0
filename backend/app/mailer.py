@@ -183,50 +183,49 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str, str] |
                 memory_store._record_push(user_id, "care")
                 return "care", await _build_simple_greeting(user_id, llm_client, "care", now)
 
-    # ── 6. 知识推送（每天1-2次，不在节奏型推送冲突时触发）──
-    from app.knowledge_push import should_push_knowledge, generate_knowledge
+    # ── 6. AI 主动创作推送 ──
+    from app.knowledge_push import should_push_knowledge, creative_decision, generate_creative_content
     kb_type = await should_push_knowledge(user_id, now)
     if kb_type:
-        memory_store._record_push(user_id, "knowledge")
-        html, subject = await _build_knowledge_post(user_id, llm_client, kb_type, now)
-        return "knowledge", html, subject
+        # AI 创意决策：要不要推？推什么？
+        decision = await creative_decision(llm_client, user_id, now)
+        if decision:
+            memory_store._record_push(user_id, "creative")
+            html, subject = await _build_creative_post(user_id, llm_client, decision, now)
+            return "creative", html, subject
 
     return None, None, None
 
 
 # ============================================================
-# 知识推送构建
+# AI 创作推送构建
 # ============================================================
 
-async def _build_knowledge_post(user_id: str, llm_client, kb_type: str, now: datetime) -> tuple[str, str]:
-    """构建知识推送邮件。返回 (html_body, subject)"""
-    from app.knowledge_push import generate_knowledge, KB_TYPES
+async def _build_creative_post(user_id: str, llm_client, decision: dict, now: datetime) -> tuple[str, str]:
+    """构建 AI 主动创作的推送邮件"""
+    from app.knowledge_push import generate_creative_content
     from app.email_templates import ai_design
     from app.file_generator import get_image_url
 
-    kb = await generate_knowledge(llm_client, user_id, kb_type)
-    cfg = KB_TYPES.get(kb_type, KB_TYPES["science_fact"])
+    creative = await generate_creative_content(llm_client, user_id, decision)
 
-    # 获取配图（基于标题关键词）
-    image_url = get_image_url(kb.get("title", "knowledge"), 800, 400)
-
-    palette = await ai_design(llm_client, user_id, "knowledge", {
+    palette = await ai_design(llm_client, user_id, "creative", {
         "name": _get_user_name(user_id), "date_str": now.strftime("%Y年%m月%d日"),
         "weekday_str": f"周{['一','二','三','四','五','六','日'][now.weekday()]}",
         "weather_text": "", "prefs_text": "",
-        "type_description": f"知识推送卡片，类型是{cfg['label']}，需要智慧而温暖的设计风格",
+        "type_description": f"创意推送，内容是{creative['content_type']}，氛围{creative['vibe']}",
     })
 
-    from app.email_templates import knowledge_card
-    html = knowledge_card(
+    from app.email_templates import creative_post
+    html = creative_post(
         palette=palette,
-        kb_emoji=cfg["emoji"], kb_label=cfg["label"],
-        title=kb["title"], content=kb["content"],
-        image_url=image_url, is_long=kb.get("is_long", False),
+        content_type=creative["content_type"],
+        title=creative["title"],
+        content=creative["content"],
+        vibe=creative["vibe"],
     )
 
-    # 邮件主题 = 文章标题（而不是固定的"Sunday知识推送"）
-    subject = f"{cfg['emoji']} {kb['title']}"
+    subject = f"{creative['title']}"
     return html, subject
 
 

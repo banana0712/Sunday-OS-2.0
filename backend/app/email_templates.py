@@ -455,6 +455,47 @@ def news_card(
     return _render_mail(body, palette)
 
 
+def creative_post(
+    palette: dict, content_type: str = "小短文", title: str = "",
+    content: str = "", vibe: str = "",
+) -> str:
+    """通用创作模板 — Sunday 想写什么就写什么"""
+    now = datetime.now(TZ)
+    time_str = now.strftime("%H:%M")
+
+    vibe_tags = {
+        "温暖治愈": "☕", "轻松有趣": "🎈", "深刻思考": "🤔",
+        "调皮可爱": "😋", "清新自然": "🌿", "浪漫梦幻": "💫",
+    }
+    vibe_icon = "✨"
+    for k, v in vibe_tags.items():
+        if k in vibe:
+            vibe_icon = v
+            break
+
+    body = f"""
+    {_header(f"{vibe_icon} Sunday · {content_type}", "随手写点什么，分享给你~", palette)}
+
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:{palette['gradient']};border-radius:16px;margin-bottom:14px;">
+    <tr><td style="padding:20px 0;text-align:center;">
+    <div style="font-size:11px;color:{palette['muted']};letter-spacing:3px;">{' '.join(palette.get('decor_emojis', ['✨']) * 2)}</div>
+    </td></tr></table>
+
+    <div style="font-size:18px;font-weight:700;color:{palette['title']};margin-bottom:14px;line-height:1.5;text-align:center;">{title}</div>
+
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:{palette['card_bg']};border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,0.03);margin-bottom:14px;">
+    <tr><td style="padding:20px 22px;font-size:15px;color:{palette['text']};line-height:2.0;">
+    {content}
+    </td></tr></table>
+
+    <div style="text-align:center;padding:4px 0 12px;">
+    <span style="font-size:10px;color:{palette['muted']};">✍️ Sunday 的随手创作 · 希望你喜欢 🌱</span>
+    </div>
+    {_footer(time_str, palette)}
+    """
+    return _render_mail(body, palette)
+
+
 def simple_greeting(palette: dict, message: str = "", greeting_type: str = "noon") -> str:
     config = {"noon": ("🍱","午安小憩"), "evening": ("🌙","晚安好梦"), "care": ("💕","想你了")}
     emoji, title = config.get(greeting_type, ("💕","想你了"))
@@ -493,7 +534,7 @@ def render(template_type: str, **kwargs) -> str:
         "morning": morning_post, "fortune": fortune_post,
         "note": little_note, "weekly": weekly_report,
         "noon": simple_greeting, "evening": simple_greeting, "care": simple_greeting,
-        "knowledge": knowledge_card, "news": news_card,
+        "knowledge": knowledge_card, "news": news_card, "creative": creative_post,
     }
     if template_type in templates:
         func = templates[template_type]

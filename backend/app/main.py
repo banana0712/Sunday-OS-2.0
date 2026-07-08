@@ -858,7 +858,7 @@ async def send_custom_push(request: Request):
 
     if template_type and not message:
         # 通过完整推送流程（含 AI 设计）
-        from app.mailer import _build_morning_post, _build_fortune_post, _build_weekly_report, _build_simple_greeting, _build_knowledge_post
+        from app.mailer import _build_morning_post, _build_fortune_post, _build_weekly_report, _build_simple_greeting, _build_creative_post
         from datetime import datetime
         now = datetime.now(TZ)
         builders = {
@@ -867,7 +867,8 @@ async def send_custom_push(request: Request):
             "noon": lambda u, c, n: _build_simple_greeting(u, c, "noon", n),
             "evening": lambda u, c, n: _build_simple_greeting(u, c, "evening", n),
             "care": lambda u, c, n: _build_simple_greeting(u, c, "care", n),
-            "knowledge": lambda u, c, n: _build_knowledge_post(u, c, "science_fact", n),
+            "knowledge": lambda u, c, n: _build_creative_post(u, c, {"content_type": "小短文", "topic": "一个有趣的话题", "vibe": "温暖治愈"}, n),
+            "creative": lambda u, c, n: _build_creative_post(u, c, {"content_type": "小短文", "topic": "一个有趣的话题", "vibe": "温暖治愈"}, n),
         }
         builder = builders.get(template_type)
         if builder:
