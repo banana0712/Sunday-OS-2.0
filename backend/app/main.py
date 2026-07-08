@@ -1046,18 +1046,24 @@ async def dashboard(request: Request):
         </tr>"""
     
     # 改进表格
-    fb_icons = {"improvement": "💡", "bug": "🐛", "todo": "📋"}
+    fb_icons = {"improvement": "💡", "bug": "🐛", "todo": "📋", "enhancement": "🔧", "feature": "🆕", "ux": "🎨", "auto": "🤖"}
     fb_html = ""
     for f in fb_items:
         icon = fb_icons.get(f["fb_type"], "📌")
-        fb_html += f"""<tr>
+        ai_cat = f.get("ai_category", "")
+        priority = f.get("priority", "")
+        cat_badge = f'<span class="badge">{ai_cat}</span>' if ai_cat else ""
+        pri_badge = f'<span class="pri pri-{priority}">{priority}</span>' if priority else ""
+        fb_html += f"""<tr id="fb-{f['id'][-8:]}">
             <td>{icon} {f['fb_type']}</td>
-            <td>{f['title'][:80]}</td>
-            <td>{f['source']}</td>
+            <td>{f['title'][:60]}</td>
+            <td>{cat_badge} {pri_badge}</td>
             <td>{f['created_at'][:10]}</td>
+            <td><button onclick="donePlan('{f['id']}')" class="btn-sm btn-done">✅</button>
+                <button onclick="delPlan('{f['id']}')" class="btn-sm btn-del">🗑️</button></td>
         </tr>"""
     if not fb_html:
-        fb_html = '<tr><td colspan="4" style="text-align:center;color:#999;padding:30px;">暂无改进计划~ 在聊天中说「改进：xxx」来添加</td></tr>'
+        fb_html = '<tr><td colspan="5" style="text-align:center;color:#999;padding:30px;">暂无改进计划~ 在聊天中 /plan 来添加</td></tr>'
     
     # 记忆表格
     mem_html = ""
@@ -1066,16 +1072,18 @@ async def dashboard(request: Request):
         status_icon = "🟢" if m.get("status") == "active" else "📦"
         status_text = "活跃" if m.get("status") == "active" else "归档"
         imp_label = m.get('importance', 'medium')
-        mem_html += f"""<tr>
+        mem_html += f"""<tr id="mem-{m['id'][-8:]}">
             <td>{status_icon} {status_text}</td>
             <td>{cat_label}</td>
-            <td>{m.get('summary', m['content'])[:60]}</td>
+            <td>{m.get('summary', m['content'])[:50]}</td>
             <td><span class="imp imp-{imp_label}">{imp_label}</span></td>
             <td>{m.get('access_count', 0)}</td>
             <td><code style="font-size:10px;">{m['id'][-8:]}</code></td>
+            <td><button onclick="archiveMem('{m['id']}')" class="btn-sm btn-arch">📦</button>
+                <button onclick="delMem('{m['id']}')" class="btn-sm btn-del">🗑️</button></td>
         </tr>"""
     if not mem_html:
-        mem_html = '<tr><td colspan="6" style="text-align:center;color:#999;padding:30px;">暂无活跃记忆</td></tr>'
+        mem_html = '<tr><td colspan="7" style="text-align:center;color:#999;padding:30px;">暂无活跃记忆</td></tr>'
 
     tabs_html = f"""
     <div class="tabs">
@@ -1094,14 +1102,20 @@ async def dashboard(request: Request):
         </div>
         <table><tr><th>类型</th><th>来源</th><th>内容</th><th>时间</th></tr>{logs_html}</table>""",
         
-        "feedback": f"""<table><tr><th>类型</th><th>标题</th><th>来源</th><th>日期</th></tr>{fb_html}</table>""",
+        "feedback": f"""<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+            <span style="font-size:13px;color:#666;">共 {len(fb_items)} 条计划</span>
+            <input id="planInput" placeholder="快速添加计划..." style="flex:1;padding:6px 10px;border:1px solid #f0c0d0;border-radius:8px;font-size:12px;outline:none;"
+                   onkeypress="if(event.key==='Enter')addPlan()">
+            <button onclick="addPlan()" class="btn-sm" style="padding:6px 12px;background:#ff6b8a;color:white;border:none;border-radius:8px;font-size:12px;cursor:pointer;">+</button>
+        </div>
+        <table><tr><th>类型</th><th>标题</th><th>分类/优先级</th><th>日期</th><th>操作</th></tr>{fb_html}</table>""",
         
         "memory": f"""<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
             <span style="font-size:13px;color:#666;">共 {len(mem_items)} 条记忆</span>
             <a href="/api/memory/export/csv?user_id=daily&key={key}" download 
                style="margin-left:auto;padding:6px 14px;background:#ff6b8a;color:white;border-radius:8px;text-decoration:none;font-size:12px;">📥 导出 CSV</a>
         </div>
-        <table><tr><th>状态</th><th>分类</th><th>摘要</th><th>重要性</th><th>访问</th><th>ID</th></tr>{mem_html}</table>""",
+        <table><tr><th>状态</th><th>分类</th><th>摘要</th><th>重要性</th><th>访问</th><th>ID</th><th>操作</th></tr>{mem_html}</table>""",
     }[tab]
 
     html = f"""<!DOCTYPE html>
@@ -1136,9 +1150,21 @@ td {{ padding: 10px 16px; font-size: 13px; border-bottom: 1px solid #f5f5f5; }}
 tr.error {{ background: #fff5f5; }}
 tr:hover {{ background: #fff8fa; }}
 .refresh {{ font-size: 12px; color: #999; text-align: center; margin-top: 16px; }}
+.btn-sm {{ padding:4px 8px;border-radius:6px;border:none;cursor:pointer;font-size:14px;line-height:1; }}
+.btn-done {{ background:#e8f5e9; }} .btn-done:hover {{ background:#c8e6c9; }}
+.btn-del {{ background:#fce4ec; }} .btn-del:hover {{ background:#f8bbd0; }}
+.btn-arch {{ background:#e3f2fd; }} .btn-arch:hover {{ background:#bbdefb; }}
+.badge {{ display:inline-block;background:#f0e6ff;color:#7c5cbf;padding:1px 8px;border-radius:10px;font-size:10px; }}
+.pri {{ display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px; }}
+.pri-high {{ background:#fce4ec;color:#c62828; }}
+.pri-medium {{ background:#fff3e0;color:#e65100; }}
+.pri-low {{ background:#e8f5e9;color:#2e7d32; }}
+.toast {{ position:fixed;bottom:20px;right:20px;background:#333;color:white;padding:10px 20px;border-radius:10px;font-size:13px;opacity:0;transition:opacity 0.3s;z-index:999; }}
+.toast.show {{ opacity:1; }}
 </style>
 </head>
 <body>
+<div id="toast" class="toast"></div>
 <div class="header">
     <h1>💕 SundayOS Dashboard</h1>
     <p>开发者面板</p>
@@ -1147,6 +1173,61 @@ tr:hover {{ background: #fff8fa; }}
 {content}
 <p class="refresh">刷新页面查看最新数据</p>
 </body>
+<script>
+const API = '/api';
+const KEY = '{key}';
+const UID = 'daily';
+
+function toast(msg) {{
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}}
+
+async function api(path, method, body) {{
+  const r = await fetch(API + path, {{
+    method, headers: {{ 'Content-Type':'application/json','X-API-Key':KEY }},
+    body: body ? JSON.stringify(body) : undefined
+  }});
+  return r.ok ? r.json() : null;
+}}
+
+// ── 改进计划操作 ──
+async function donePlan(id) {{
+  if (!confirm('标记为已完成？')) return;
+  const r = await api('/memory/feedback/'+id+'/done', 'POST', {{}});
+  if (r) {{ toast('✅ 已标记完成'); document.getElementById('fb-'+id.slice(-8)).remove(); }}
+  else toast('❌ 操作失败');
+}}
+async function delPlan(id) {{
+  if (!confirm('确认删除？')) return;
+  const r = await api('/memory/feedback/'+id+'/delete', 'POST', {{}});
+  if (r) {{ toast('🗑️ 已删除'); document.getElementById('fb-'+id.slice(-8)).remove(); }}
+  else toast('❌ 操作失败');
+}}
+async function addPlan() {{
+  const inp = document.getElementById('planInput');
+  const title = inp.value.trim();
+  if (!title) return;
+  const r = await api('/feedback/add', 'POST', {{ user_id:UID, title, fb_type:'enhancement' }});
+  if (r) {{ toast('✅ 已添加'); setTimeout(() => location.reload(), 500); }}
+  else toast('❌ 添加失败');
+  inp.value = '';
+}}
+
+// ── 记忆操作 ──
+async function archiveMem(id) {{
+  const r = await api('/memory/'+id+'/archive', 'POST', {{}});
+  if (r) {{ toast('📦 已归档'); setTimeout(() => location.reload(), 500); }}
+  else toast('❌ 操作失败');
+}}
+async function delMem(id) {{
+  if (!confirm('确认删除这条记忆？')) return;
+  const r = await api('/memory/'+id, 'DELETE');
+  if (r) {{ toast('🗑️ 已删除'); document.getElementById('mem-'+id.slice(-8)).remove(); }}
+  else toast('❌ 操作失败');
+}}
+</script>
 </html>"""
     from fastapi.responses import HTMLResponse
     return HTMLResponse(content=html)
@@ -1207,6 +1288,23 @@ async def add_feedback_api(request: Request):
     fb_id = memory_store.add_feedback(user_id, fb_type, title, detail,
                                        ai_category=ai_category, priority=priority)
     return {"status": "added", "fb_id": fb_id}
+
+
+@app.post("/api/memory/feedback/{fb_id}/done")
+async def done_feedback(fb_id: str, request: Request):
+    """标记改进计划为已完成"""
+    await verify_key(request)
+    memory_store.update_feedback(fb_id, status="done")
+    return {"status": "done"}
+
+
+@app.post("/api/memory/feedback/{fb_id}/delete")
+async def delete_feedback(fb_id: str, request: Request):
+    """删除改进计划"""
+    await verify_key(request)
+    # 直接标记为 deleted 状态
+    memory_store.update_feedback(fb_id, status="deleted")
+    return {"status": "deleted"}
 # force rebuild Thu Jul  9 02:08:18 AM CST 2026
 
 # deploy 1783536301
