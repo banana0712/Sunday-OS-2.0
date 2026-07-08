@@ -111,6 +111,8 @@ def init_db():
             detail TEXT DEFAULT '',
             source TEXT DEFAULT 'telegram',
             status TEXT DEFAULT 'open',
+            ai_category TEXT DEFAULT '',
+            priority TEXT DEFAULT 'medium',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -796,15 +798,16 @@ class MemoryStore:
     # ============================================================
     # 改进反馈系统
     # ============================================================
-    def add_feedback(self, user_id: str, fb_type: str, title: str, detail: str = "", source: str = "telegram") -> str:
+    def add_feedback(self, user_id: str, fb_type: str, title: str, detail: str = "",
+                     source: str = "telegram", ai_category: str = "", priority: str = "medium") -> str:
         """添加一条改进反馈"""
         conn = get_db()
         now = datetime.now(TZ).isoformat()
         fb_id = f"fb_{uuid.uuid4().hex[:8]}"
         conn.execute(
-            """INSERT INTO feedback (id, user_id, fb_type, title, detail, source, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
-            (fb_id, user_id, fb_type, title, detail, source, now, now),
+            """INSERT INTO feedback (id, user_id, fb_type, title, detail, source, status, ai_category, priority, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)""",
+            (fb_id, user_id, fb_type, title, detail, source, ai_category, priority, now, now),
         )
         conn.commit()
         conn.close()
@@ -832,7 +835,7 @@ class MemoryStore:
     def update_feedback(self, fb_id: str, **kwargs) -> bool:
         """更新反馈状态"""
         conn = get_db()
-        allowed = ["status", "title", "detail"]
+        allowed = ["status", "title", "detail", "fb_type", "ai_category", "priority"]
         updates = {k: kwargs[k] for k in allowed if k in kwargs}
         if not updates:
             conn.close()

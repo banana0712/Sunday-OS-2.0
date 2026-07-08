@@ -67,7 +67,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 记录到日志系统
     log("chat", user_id, "telegram", message_text[:100])
 
-    # 自动检测改进反馈
+    # 自动检测改进反馈（通过 /plan 命令或自然语言检测）
     is_feedback = _detect_feedback(message_text, user_id)
 
     # AI 驱动的意图判断：是否需要生成文件/报告/邮件发送
@@ -723,37 +723,105 @@ async def knowledge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _detect_feedback(message: str, user_id: str) -> bool:
-    """自动检测消息中是否包含改进反馈，并进行质量检查"""
+    """检测改进反馈：支持 /: 命令 + 自然语言 + AI自动分类"""
     import re
 
     detected = None
 
-    # 改进/建议
-    m = re.search(r'(?:改进|优化|建议|想法)[：:]\s*(.+)', message)
+    # 新格式：/: 内容 → 直接写入改进计划
+    m = re.search(r'/:\s*(.+)', message)
     if m:
-        detected = ("improvement", m.group(1).strip(), message[:200])
+        title = m.group(1).strip()
+        if len(title) >= 3:
+            detected = ("auto", title, message[:300])
 
-    # Bug
-    m = re.search(r'(?:bug|Bug|BUG|问题|报错)[：:]\s*(.+)', message)
-    if m:
-        detected = ("bug", m.group(1).strip(), message[:200])
+    # 旧格式兼容：改进:/优化:/bug:/TODO:
+    if not detected:
+        m = re.search(r'(?:改进|优化|建议|想法)[：:]\s*(.+)', message)
+        if m:
+            detected = ("improvement", m.group(1).strip(), message[:200])
 
-    # TODO
-    m = re.search(r'(?:TODO|todo|待办|要做)[：:]\s*(.+)', message)
-    if m:
-        detected = ("todo", m.group(1).strip(), message[:200])
+        m = re.search(r'(?:bug|Bug|BUG|问题|报错)[：:]\s*(.+)', message)
+        if m:
+            detected = ("bug", m.group(1).strip(), message[:200])
 
-    if detected:
-        fb_type, title, detail = detected
+        m = re.search(r'(?:TODO|todo|待办|要做)[：:]\s*(.+)', message)
+        if m:
+            detected = ("todo", m.group(1).strip(), message[:200])
 
-        # 质量检查：过滤垃圾反馈
-        if not _is_quality_feedback(title, detail):
-            return False
+    if not detected:
+        return False
 
+    fb_type, title, detail = detected
+
+    if not _is_quality_feedback(title, detail):
+        return False
+
+    # 如果是 /: 格式（auto类型），让AI自动分类
+    if fb_type == "auto":
+        asyncio.create_task(_ai_classify_feedback(user_id, title, detail))
+        # 先以默认类型存入
+        fb_id = memory_store.add_feedback(user_id, "improvement", title, detail,
+                                           ai_category="pending", priority="medium")
+        return True
+    else:
         fb_id = memory_store.add_feedback(user_id, fb_type, title, detail)
         return True
 
-    return False
+
+async def _ai_classify_feedback(user_id: str, title: str, detail: str):
+    """AI 自动分类改进计划：判断类型、优化标题、标注优先级"""
+    from app.main import llm_service
+    from app.config import settings as app_settings
+
+    prompt = f"""你是一个项目管理助手。请分析以下改进计划并分类。
+
+改进内容：{title}
+补充信息：{detail[:200]}
+
+请输出 JSON：
+{{
+  "fb_type": "feature(新功能) / enhancement(提升优化) / bug(问题修复) / ux(体验改进) / other",
+  "optimized_title": "优化后的标题（更清晰准确，15-40字）",
+  "ai_category": "具体分类标签（如：记忆系统/聊天体验/邮件推送/Telegram/报告生成/知识推送/基础设施/其他）",
+  "priority": "high / medium / low",
+  "note": "一句话补充建议"
+}}
+
+判断标准：
+- 用户说"新增/添加/加一个"→ feature
+- 用户说"优化/改进/提升/让XX更好"→ enhancement
+- 用户说"修复/修/XX有问题/bug/报错"→ bug
+- 用户说"体验/交互/界面/好看"→ ux
+- 不确定→ other
+
+只输出JSON。"""
+
+    try:
+        resp = await llm_service.client.chat.completions.create(
+            model=app_settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3, max_tokens=300,
+        )
+        import json as _json, re as _re
+        text = resp.choices[0].message.content.strip()
+        match = _re.search(r'\{[\s\S]*\}', text)
+        if match:
+            result = _json.loads(match.group())
+
+            # 找到刚存入的 feedback 并更新
+            fbs = memory_store.get_feedback(user_id, limit=1)
+            if fbs:
+                fb = fbs[0]
+                memory_store.update_feedback(
+                    fb["id"],
+                    fb_type=result.get("fb_type", "enhancement"),
+                    title=result.get("optimized_title", title),
+                    ai_category=result.get("ai_category", ""),
+                    priority=result.get("priority", "medium"),
+                )
+    except Exception as e:
+        logger.warning(f"AI分类反馈失败: {e}")
 
 
 def _is_quality_feedback(title: str, detail: str) -> bool:

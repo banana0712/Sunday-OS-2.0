@@ -28,6 +28,20 @@
 
 ---
 
+## v3.1.2 - 2026-07-09 05:56
+
+### 新增功能
+- **`/:` 快速写入改进计划**：在聊天中直接 `/: 内容` → 自动写入改进计划
+  - AI 自动分类：判断 feature/enhancement/bug/ux/other
+  - AI 自动优化标题、标注优先级、添加分类标签
+  - 影响文件：`app/telegram_bot.py`, `app/memory.py`
+
+### 优化
+- feedback 表新增 `ai_category` 和 `priority` 字段
+- 旧格式（改进:/bug:/TODO:）仍兼容
+
+---
+
 ## v3.1.1 - 2026-07-09 05:42
 
 ### 新增功能
