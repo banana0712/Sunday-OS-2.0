@@ -67,8 +67,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 记录到日志系统
     log("chat", user_id, "telegram", message_text[:100])
 
-    # 自动检测改进反馈（通过 /plan 命令或自然语言检测）
+    # 自动检测改进反馈
     is_feedback = _detect_feedback(message_text, user_id)
+
+    # 自动检测计划完成状态（异步，不影响聊天回复）
+    asyncio.create_task(_auto_check_plan_done(message_text, user_id, update))
 
     # AI 驱动的意图判断：是否需要生成文件/报告/邮件发送
     intent = await _ai_detect_intent(message_text, user_id)
@@ -838,6 +841,61 @@ async def _ai_classify_feedback(user_id: str, title: str, detail: str):
                 )
     except Exception as e:
         logger.warning(f"AI分类反馈失败: {e}")
+
+
+async def _auto_check_plan_done(message: str, user_id: str, update: Update):
+    """AI自动检测用户是否在说某条计划完成了"""
+    fbs = memory_store.get_feedback(user_id, status="open", limit=20)
+    if not fbs:
+        return
+
+    # 构建计划列表供AI匹配
+    plan_list = "\n".join([f"- [{fb['id'][-8:]}] {fb['title']}" for fb in fbs])
+
+    from app.main import llm_service
+    from app.config import settings as app_settings
+
+    prompt = f"""判断以下用户消息是否在说某条计划已经完成了。
+
+用户消息：{message}
+
+进行中的计划：
+{plan_list}
+
+请输出 JSON：
+{{
+  "matched": true/false,
+  "fb_id_suffix": "匹配到的计划ID后8位（如 fb_12345678）",
+  "confidence": "high/medium/low"
+}}
+
+判断标准：
+- 用户说"搞定了/完成了/做好了/解决了/实现了/上线了/弄好了/OK了" → 可能完成了
+- 要匹配具体是哪条计划（语义相似度）
+- 不确定就不匹配（matched: false）
+- 只输出JSON"""
+
+    try:
+        resp = await llm_service.client.chat.completions.create(
+            model=app_settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2, max_tokens=200,
+        )
+        import json as _json, re as _re
+        text = resp.choices[0].message.content.strip()
+        match = _re.search(r'\{[\s\S]*\}', text)
+        if match:
+            result = _json.loads(match.group())
+            if result.get("matched") and result.get("confidence") in ("high", "medium"):
+                suffix = result.get("fb_id_suffix", "")
+                # 找到对应计划
+                for fb in fbs:
+                    if fb["id"].endswith(suffix):
+                        memory_store.update_feedback(fb["id"], status="done")
+                        await update.message.reply_text(f"✅ 已自动标记完成：{fb['title'][:50]}")
+                        return
+    except Exception:
+        pass  # 静默失败，不影响聊天
 
 
 def _is_quality_feedback(title: str, detail: str) -> bool:
