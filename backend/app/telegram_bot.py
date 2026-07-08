@@ -349,25 +349,25 @@ async def _ai_detect_intent(message_text: str, user_id: str) -> dict | None:
 请输出 JSON，只输出 JSON：
 {{
   "has_intent": true/false,
-  "intent_type": "report" | "email_send" | "chart" | "none",
-  "topic": "提取的核心主题（如果意图是report/chart）",
+  "intent_type": "report" | "creative_push" | "email_send" | "chart" | "none",
+  "topic": "提取的核心主题",
   "style": "academic" | "brief" | "creative" | "auto",
   "send_email": true/false,
-  "explanation": "一句话解释你的判断（内部用，不发给用户）"
+  "explanation": "一句话解释"
 }}
 
 意图说明：
-- "report": 用户想要生成一份正式文档/报告（word/pdf），明确说了"报告/文档/word/论文/总结"
-- "email_send": 用户想把之前生成的文件通过邮件发送
+- "report": 用户想要生成正式文档/报告（明确说"报告/文档/word/论文/总结"）
+- "creative_push": 用户想要你立即创作一篇内容推送（"写一篇XX/帮我创作/生成推送/写个小短文/做个手作报道"等），这是创作请求，不是正式报告
+- "email_send": 用户想把文件通过邮件发送
 - "chart": 用户想要生成图表
-- "none": 普通聊天，不需要特殊处理
+- "none": 普通聊天
 
 判断关键：
-- 如果用户说"写个情书/小作文/故事/小说"，且没有提到 word/报告/文档 → has_intent=false
-- 如果用户说"用word形式/生成word/写报告" → has_intent=true, intent_type="report"
-- 如果用户在文件生成后说"用邮件发给我" → intent_type="email_send"
-- style判断：学术话题→academic，创意写作→creative，日常→brief，不确定→auto
-- 不要被情感词汇误导，只关注用户是否真的想要文件/文档"""
+- "帮我写一篇关于XX的文章/短文/推送" → creative_push（立即创作）
+- "用word形式/生成word/写报告" → report（正式文档）
+- "写个情书/小作文"且没提word → none（正常聊天）
+- 用户明确要求"写/创作/生成/做一篇XX"且不是正式文档 → creative_push"""
 
     try:
         resp = await llm_service.client.chat.completions.create(
@@ -441,8 +441,47 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             logger.error(f"报告生成失败: {e}")
             await update.message.reply_text(f"❌ 报告生成出了点小问题：{str(e)[:100]}")
 
+    elif intent_type == "creative_push":
+        # 立即创作推送
+        if not topic:
+            await update.message.reply_text("嗯？你想让我写什么主题呀？告诉我嘛~")
+            return
+
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+        await update.message.reply_text(f"✍️ 好的！正在为你创作「{topic}」...")
+
+        try:
+            from app.main import llm_service
+            from app.knowledge_push import creative_decision, generate_creative_content
+            from datetime import datetime
+
+            decision = {"content_type": "小短文", "topic": topic, "vibe": style if style != "auto" else "温暖治愈"}
+            creative = await generate_creative_content(llm_service.client, user_id, decision)
+
+            # 发送到 Telegram
+            msg = f"✨ *{creative['title']}*\n\n{creative['content']}\n\n— Sunday 为你创作 💕"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+
+            # 也发邮件
+            from app.mailer import send_email
+            from app.email_templates import ai_design, creative_post
+            from datetime import datetime as dt
+
+            palette = await ai_design(llm_service.client, user_id, "creative", {
+                "name": "", "date_str": dt.now().strftime("%Y年%m月%d日"),
+                "weekday_str": "", "weather_text": "", "prefs_text": "",
+                "type_description": f"创意推送，内容是{creative['content_type']}，氛围{creative['vibe']}",
+            })
+            html = creative_post(palette=palette, content_type=creative['content_type'],
+                                 title=creative['title'], content=creative['content'], vibe=creative['vibe'])
+            send_email(subject=creative['title'], html_body=html)
+
+        except Exception as e:
+            logger.error(f"创意推送失败: {e}")
+            await update.message.reply_text(f"❌ 创作出了点小问题：{str(e)[:100]}")
+
     elif intent_type == "email_send":
-        await update.message.reply_text("📧 要发邮件的话，下次在请求报告时直接说「用邮件发给我」就好啦~")
+        await update.message.reply_text("📧 要发邮件的话，下次在请求时直接说「用邮件发给我」就好啦~")
     elif intent_type == "chart":
         await update.message.reply_text("📊 图表功能还在开发中，敬请期待~")
 
