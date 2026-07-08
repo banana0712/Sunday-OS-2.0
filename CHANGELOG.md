@@ -28,6 +28,34 @@
 
 ---
 
+## v3.2.0 - 2026-07-09 06:35
+
+### 新增功能
+- **SundayOS 控制台**：Dashboard 升级为四 Tab 管理后台（总览/记忆/计划/日志）
+  - 影响文件：`app/main.py`
+- **总览页**：数据统计卡片 + 用户画像（Sunday眼中的你）+ 最近对话记录
+  - 影响文件：`app/main.py`
+- **记忆管理**：控制台直接新增记忆（输入框+按钮）
+  - 影响文件：`app/main.py`
+- **改进计划管理**：控制台快速添加/完成/删除计划
+  - 影响文件：`app/main.py`
+- **AI 自动完成检测**：聊天中说"搞定了/做好了"→ AI 自动匹配并标记对应计划为 done
+  - 影响文件：`app/telegram_bot.py`
+- **`/plan` 命令**：替代 `/:`，标准命令格式（`/plan` `/bug` `/todo` `/ux`）
+  - 影响文件：`app/telegram_bot.py`
+- **移动端响应式适配**：卡片堆叠、表格横向滚动、字体缩放
+  - 影响文件：`app/main.py`
+
+### 修复
+- **feedback 表自动迁移**：旧表自动添加 `ai_category` 和 `priority` 列
+  - 影响文件：`app/memory.py`
+- **feedback API**：新增 POST `/api/feedback/add` 和 done/delete 端点
+  - 影响文件：`app/main.py`
+- **移动端表格换行**：内容正常换行显示，不截断不用省略号
+  - 影响文件：`app/main.py`
+
+---
+
 ## v3.1.2 - 2026-07-09 05:56
 
 ### 新增功能
