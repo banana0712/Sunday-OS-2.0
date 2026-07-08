@@ -723,19 +723,35 @@ async def knowledge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _detect_feedback(message: str, user_id: str) -> bool:
-    """检测改进反馈：支持 /: 命令 + 自然语言 + AI自动分类"""
+    """检测改进反馈：/plan /bug /todo /ux 命令 + AI自动分类"""
     import re
 
     detected = None
 
-    # 新格式：/: 内容 → 直接写入改进计划
-    m = re.search(r'/:\s*(.+)', message)
+    # /plan → 通用改进计划（AI自动分类）
+    m = re.search(r'^/plan\s+(.+)', message)
     if m:
-        title = m.group(1).strip()
-        if len(title) >= 3:
-            detected = ("auto", title, message[:300])
+        detected = ("auto", m.group(1).strip(), message[:300])
 
-    # 旧格式兼容：改进:/优化:/bug:/TODO:
+    # /bug → 问题报告
+    if not detected:
+        m = re.search(r'^/bug\s+(.+)', message)
+        if m:
+            detected = ("bug", m.group(1).strip(), message[:300])
+
+    # /todo → 待办事项
+    if not detected:
+        m = re.search(r'^/todo\s+(.+)', message)
+        if m:
+            detected = ("todo", m.group(1).strip(), message[:300])
+
+    # /ux → 体验改进
+    if not detected:
+        m = re.search(r'^/ux\s+(.+)', message)
+        if m:
+            detected = ("ux", m.group(1).strip(), message[:300])
+
+    # 旧格式兼容
     if not detected:
         m = re.search(r'(?:改进|优化|建议|想法)[：:]\s*(.+)', message)
         if m:
@@ -757,7 +773,7 @@ def _detect_feedback(message: str, user_id: str) -> bool:
     if not _is_quality_feedback(title, detail):
         return False
 
-    # 如果是 /: 格式（auto类型），让AI自动分类
+    # /plan 类型让AI自动分类
     if fb_type == "auto":
         asyncio.create_task(_ai_classify_feedback(user_id, title, detail))
         # 先以默认类型存入
