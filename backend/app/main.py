@@ -1112,8 +1112,11 @@ async def dashboard(request: Request):
         
         "memory": f"""<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
             <span style="font-size:13px;color:#666;">共 {len(mem_items)} 条记忆</span>
+            <input id="memInput" placeholder="新增记忆摘要..." style="flex:1;padding:6px 10px;border:1px solid #f0c0d0;border-radius:8px;font-size:12px;outline:none;"
+                   onkeypress="if(event.key==='Enter')addMem()">
+            <button onclick="addMem()" class="btn-sm" style="padding:6px 12px;background:#ff6b8a;color:white;border:none;border-radius:8px;font-size:12px;cursor:pointer;">+</button>
             <a href="/api/memory/export/csv?user_id=daily&key={key}" download 
-               style="margin-left:auto;padding:6px 14px;background:#ff6b8a;color:white;border-radius:8px;text-decoration:none;font-size:12px;">📥 导出 CSV</a>
+               style="padding:6px 14px;background:#fff0f3;color:#ff6b8a;border-radius:8px;text-decoration:none;font-size:12px;">📥 导出</a>
         </div>
         <table><tr><th>状态</th><th>分类</th><th>摘要</th><th>重要性</th><th>访问</th><th>ID</th><th>操作</th></tr>{mem_html}</table>""",
     }[tab]
@@ -1123,7 +1126,7 @@ async def dashboard(request: Request):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SundayOS Dashboard</title>
+<title>Sunday Admin</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ font-family: -apple-system, 'PingFang SC', sans-serif; background: #fef9f4; color: #333; padding: 20px; }}
@@ -1166,7 +1169,8 @@ tr:hover {{ background: #fff8fa; }}
 <body>
 <div id="toast" class="toast"></div>
 <div class="header">
-    <h1>💕 SundayOS Dashboard</h1>
+    <h1>💕 Sunday Admin</h1>
+    <p>记忆管理 · 改进计划 · 运行日志 | v3.1</p>
     <p>开发者面板</p>
 </div>
 {tabs_html}
@@ -1220,6 +1224,15 @@ async function archiveMem(id) {{
   const r = await api('/memory/'+id+'/archive', 'POST', {{}});
   if (r) {{ toast('📦 已归档'); setTimeout(() => location.reload(), 500); }}
   else toast('❌ 操作失败');
+}}
+async function addMem() {{
+  const inp = document.getElementById('memInput');
+  const summary = inp.value.trim();
+  if (!summary) return;
+  const r = await api('/memory', 'POST', {{ user_id:UID, summary, category:'note', importance:'medium' }});
+  if (r) {{ toast('✅ 已添加'); setTimeout(() => location.reload(), 500); }}
+  else toast('❌ 添加失败');
+  inp.value = '';
 }}
 async function delMem(id) {{
   if (!confirm('确认删除这条记忆？')) return;
