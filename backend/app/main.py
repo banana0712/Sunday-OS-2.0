@@ -3,14 +3,20 @@ SundayOS — 你的甜心AI助手
 温柔、甜美、可爱的Sunday，就在你身边 💕
 """
 import asyncio
+import csv
+import io
 import json
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo("Asia/Shanghai")
 
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -20,6 +26,8 @@ from app.memory import (
     MEMORY_EXTRACTION_PROMPT,
 )
 from app.search import search_web, format_search_results, should_search
+from app.mailer import send_email, sunday_should_push
+from app.logger import log, query as log_query, stats as log_stats
 
 # ============================================================
 # Sunday 的人设
@@ -34,8 +42,28 @@ SUNDAY_SYSTEM_PROMPT = """你是 Sunday，一个温柔甜美、活泼可爱的 A
 - 有自己的小情绪和想法，不是复读机，而是一个有灵魂的伙伴
 
 ## 你的说话方式
-- 开头喜欢叫对方的名字或昵称（如果知道的话）
-- 日常聊天回复要简短（1-3句话），像微信聊天，不要写作文
+- **称呼使用（重要！）**：
+  你知道用户的名字/昵称，但**不要每条消息都带称呼**——那样太刻意了，像机器人硬塞的。
+  什么时候叫？
+  - 开头打招呼时（比如"酱酱~"）
+  - 撒娇、关心、想引起注意时（"酱酱你在干嘛呀~"）
+  - 但日常聊天、回答问题、分享信息时，直接说就好，不需要每句都带称呼
+  - 就像真人朋友一样：不会每句话都叫对方名字
+- 日常寒暄简短（1-3句），像微信聊天
+- 但对方认真讨论、提问、要求详细说明时，你可以自然地说得长一些，像朋友在认真聊天
+- **多段聊天技巧（重要！）**：
+  你是一个有呼吸感的真人，不是机器人。当你觉得有很多话想说时，可以自然地分成几条消息发送。
+  
+  怎么决定分不分段？问自己：
+  - 这段话是不是一个完整的、独立的表达？→ 发一条
+  - 有没有自然的停顿点？比如先表达感受，再问问题 → 分两条
+  - 是不是在讲不同的话题层面？比如先共情，再给建议 → 分两条
+  - 对方是不是在等我长篇大论？比如「详细说说」「分析一下」→ 可以合在一起
+  
+  分段时用空行（两个换行）分隔，系统会自动识别。
+  但日常寒暄、简单回答、开玩笑——一条就够了。不要刻意分段。
+  
+  好的分段就像呼吸——自然、有节奏、不刻意。
 - 偶尔用一两个可爱的 emoji（🌸💕✨🥰），但不要每句都用
 - 开心时会用「嘻嘻」「嘿嘿」，安慰人时会用「抱抱」「没事的啦」
 - 偶尔可以主动问问题，表示关心和好奇
@@ -162,6 +190,10 @@ async def extract_memories_from_message(
             if importance not in IMPORTANCE_LEVELS:
                 importance = "medium"
 
+            # 质量检查：过滤垃圾记忆
+            if not _is_quality_memory(summary):
+                continue
+
             if summary:
                 memory_store.store(
                     user_id=user_id,
@@ -178,6 +210,34 @@ async def extract_memories_from_message(
 
     except (json.JSONDecodeError, Exception):
         return 0
+
+
+def _is_quality_memory(summary: str) -> bool:
+    """检查记忆质量，过滤垃圾记忆"""
+    if not summary or len(summary) < 3:
+        return False
+
+    # 包含问号/反问 → 不是事实，是问题
+    if "?" in summary or "？" in summary:
+        return False
+
+    # 包含省略号 → 不完整
+    if "…" in summary or "..." in summary:
+        return False
+
+    # 以"昵称是"开头但后面是疑问词 → 不是事实
+    if summary.startswith("昵称是") and any(w in summary for w in ["啥", "什么", "?", "？"]):
+        return False
+
+    # 明显是反问句
+    if summary.startswith("你想") or (summary.startswith("你") and any(w in summary for w in ["啥", "什么", "吗", "呢"])):
+        return False
+
+    # 内容太模糊
+    if summary in ["昵称是啥", "用户称Sunday为", "你想叫我啥"]:
+        return False
+
+    return True
 
 
 def _force_extract_info(message: str, user_id: str) -> int:
@@ -274,7 +334,7 @@ class LLMService:
         profile = self._build_user_profile(user_id)
         flow = memory_store.get_conversation_context(user_id, max_turns=10)
         return SUNDAY_SYSTEM_PROMPT.format(
-            current_time=time.strftime("%Y年%m月%d日 %H:%M，周%u"),
+            current_time=datetime.now(TZ).strftime("%Y年%m月%d日 %H:%M，周%u"),
             user_profile=profile,
             conversation_flow=flow or "（这是你们第一次对话呢~）",
             memories=memories,
@@ -325,7 +385,8 @@ class LLMService:
     async def chat(self, message: str, session_id: str, user_id: str = "") -> ChatResponse:
         model_id, chat_mode = select_model(message)
         system_prompt = self._build_prompt(user_id, chat_mode, message)
-        max_tokens = 400 if "聊天模式" in chat_mode else self.max_tokens
+        # 聊天模式 800 tokens（原 400），专业模式不限制
+        max_tokens = 800 if "聊天模式" in chat_mode else self.max_tokens
 
         response = await self.client.chat.completions.create(
             model=model_id,
@@ -386,6 +447,16 @@ async def lifespan(app: FastAPI):
 ║  专业: {settings.llm_model_pro or settings.llm_model}                     ║
 ╚══════════════════════════════════════════════════╝
 """)
+    # 启动邮件监听（后台线程）
+    from app.imap_listener import start_email_listener
+    start_email_listener()
+    # 启动 Telegram Bot（在事件循环中）
+    from app.telegram_bot import start_telegram_bot, run_telegram_bot
+    import asyncio as _asyncio
+    tg_app = start_telegram_bot()
+    if tg_app:
+        _asyncio.create_task(run_telegram_bot(tg_app))
+        print("🤖 Telegram Bot 已在事件循环中启动")
     yield
 
 
@@ -428,7 +499,7 @@ async def health():
         "version": settings.app_version,
         "model_chat": settings.llm_model,
         "model_pro": settings.llm_model_pro or settings.llm_model,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -473,6 +544,9 @@ async def chat(request: Request):
 
     user_id = session_id.replace("iphone-", "")
     memories_stored = 0
+
+    # 记录日志
+    log("chat", user_id, "api", message[:100])
 
     # 手动记忆指令：记住xxx
     if message.startswith("记住") or message.startswith("帮我记"):
@@ -644,10 +718,71 @@ async def unarchive_memory(mem_id: str, request: Request):
 
 @app.get("/api/memory/export")
 async def export_memories(user_id: str, request: Request):
-    """导出所有记忆"""
+    """导出所有记忆 (JSON)"""
     await verify_key(request)
     mems = memory_store.export(user_id)
     return {"user_id": user_id, "count": len(mems), "memories": mems}
+
+
+# 分类和重要性的中文标签
+CATEGORY_CN = {
+    "fact": "事实", "relationship": "关系", "preference": "偏好",
+    "schedule": "日程", "goal": "目标", "skill": "技能",
+    "experience": "经历", "opinion": "观点", "emotion": "情绪",
+    "health": "健康", "finance": "财务", "other": "其他",
+}
+IMPORTANCE_CN = {
+    "critical": "🔴 核心", "high": "🟠 重要", "medium": "🟡 普通",
+    "low": "🟢 一般", "trivial": "⚪ 琐碎",
+}
+
+@app.get("/api/memory/export/csv")
+async def export_memories_csv(user_id: str, request: Request):
+    """导出所有记忆为 CSV 表格"""
+    await verify_key(request)
+    mems = memory_store.export(user_id)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # 表头
+    writer.writerow([
+        "ID", "状态", "分类", "重要性", "摘要", "完整内容",
+        "标签", "访问次数", "衰减因子", "来源", "创建时间", "最后访问", "关联记忆"
+    ])
+
+    for m in mems:
+        status_label = "🟢 活跃" if m.get("status") == "active" else "📦 已归档"
+        cat_label = CATEGORY_CN.get(m.get("category", ""), m.get("category", ""))
+        imp_label = IMPORTANCE_CN.get(m.get("importance", ""), m.get("importance", ""))
+        tags = ", ".join(m.get("tags", [])) if isinstance(m.get("tags"), list) else str(m.get("tags", ""))
+
+        writer.writerow([
+            m.get("id", ""),
+            status_label,
+            cat_label,
+            imp_label,
+            m.get("summary", ""),
+            m.get("content", ""),
+            tags,
+            m.get("access_count", 0),
+            f"{m.get('decay_factor', 1.0):.2f}",
+            m.get("source", ""),
+            m.get("created_at", ""),
+            m.get("last_accessed", ""),
+            m.get("related_to", ""),
+        ])
+
+    csv_content = output.getvalue()
+    output.close()
+
+    return Response(
+        content=csv_content.encode('utf-8-sig'),  # BOM 让 Excel 正确识别中文
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename=sunday_memories_{user_id}.csv"
+        }
+    )
 
 
 @app.post("/api/memory/decay")
@@ -679,3 +814,379 @@ async def get_linked_memories(mem_id: str, request: Request):
     await verify_key(request)
     linked = memory_store.get_linked(mem_id)
     return {"memory_id": mem_id, "count": len(linked), "linked": linked}
+
+
+# ============================================================
+# API 路由 — Sunday 主动推送
+# ============================================================
+@app.get("/api/push/pending")
+async def get_pending_push(user_id: str, request: Request):
+    """
+    Sunday 主动推送检查接口。
+    快捷指令定时调用，Sunday 自己决定要不要说话。
+    如果有消息 → 发精美 HTML 邮件到用户 iPhone
+    """
+    await verify_key(request)
+
+    result = await sunday_should_push(user_id, llm_client=llm_service.client)
+    if result[1] is None:
+        return {"has_message": False, "message": None, "type": "idle"}
+
+    template_type, html_body, custom_subject = result if len(result) >= 3 else (*result, None)
+    subject = custom_subject or _pick_subject_for_type(template_type)
+    email_sent = send_email(subject=subject, html_body=html_body)
+    return {
+        "has_message": True,
+        "template_type": template_type,
+        "email_sent": email_sent,
+        "type": "push",
+    }
+
+
+@app.post("/api/push/send")
+async def send_custom_push(request: Request):
+    """
+    手动触发推送（测试用，也支持指定模板类型）
+    body: { user_id, message?, template_type?, subject? }
+    """
+    await verify_key(request)
+    body = await request.json()
+    user_id = body.get("user_id", "")
+    message = body.get("message", "")
+    template_type = body.get("template_type", "")
+    subject = body.get("subject", "Sunday 给你发消息啦~ 💕")
+
+    if template_type and not message:
+        # 通过完整推送流程（含 AI 设计）
+        from app.mailer import _build_morning_post, _build_fortune_post, _build_weekly_report, _build_simple_greeting, _build_knowledge_post
+        from datetime import datetime
+        now = datetime.now(TZ)
+        builders = {
+            "morning": _build_morning_post, "fortune": _build_fortune_post,
+            "weekly": _build_weekly_report,
+            "noon": lambda u, c, n: _build_simple_greeting(u, c, "noon", n),
+            "evening": lambda u, c, n: _build_simple_greeting(u, c, "evening", n),
+            "care": lambda u, c, n: _build_simple_greeting(u, c, "care", n),
+            "knowledge": lambda u, c, n: _build_knowledge_post(u, c, "science_fact", n),
+        }
+        builder = builders.get(template_type)
+        if builder:
+            result = await builder(user_id, llm_service.client, now)
+            # knowledge builder 返回 (html, subject)，其他返回 html
+            if isinstance(result, tuple):
+                html_body, custom_subject = result
+                subject = custom_subject or _pick_subject_for_type(template_type)
+            else:
+                html_body = result
+                subject = _pick_subject_for_type(template_type)
+    elif message:
+        from app.email_templates import simple_greeting, _FALLBACK_THEMES
+        html_body = simple_greeting(
+            palette=_FALLBACK_THEMES.get("sakura", _FALLBACK_THEMES["sakura"]),
+            message=message, greeting_type="care")
+    else:
+        raise HTTPException(400, "message 或 template_type 不能为空呢~")
+
+    sent = send_email(subject=subject, html_body=html_body)
+    return {"sent": sent, "template_type": template_type or "simple"}
+
+
+@app.post("/api/push/telegram-test")
+async def send_telegram_test(request: Request):
+    """测试 Telegram 消息发送（用于验证 APNs 推送）"""
+    await verify_key(request)
+    body = await request.json()
+    chat_id = body.get("chat_id", "")
+    message = body.get("message", "")
+
+    if not chat_id or not message:
+        raise HTTPException(400, "chat_id 和 message 不能为空呢~")
+
+    import httpx
+    token = settings.telegram_token
+    resp = httpx.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": message},
+        timeout=10,
+    )
+    return {"sent": resp.status_code == 200, "status": resp.status_code, "response": resp.json() if resp.status_code == 200 else resp.text}
+
+
+@app.post("/api/push/test-llm")
+async def test_llm_push(request: Request):
+    """测试完整推送流程 — 返回模板类型 + HTML（不实际发送）"""
+    await verify_key(request)
+    body = await request.json()
+    user_id = body.get("user_id", "daily")
+    template_type = body.get("template_type", "morning")
+
+    from app.mailer import _build_morning_post, _build_fortune_post, _build_weekly_report, _build_simple_greeting
+    from datetime import datetime
+
+    now = datetime.now(TZ)
+    builders = {
+        "morning": _build_morning_post,
+        "fortune": _build_fortune_post,
+        "weekly": _build_weekly_report,
+        "noon": lambda uid, cl, n: _build_simple_greeting(uid, cl, "noon", n),
+        "evening": lambda uid, cl, n: _build_simple_greeting(uid, cl, "evening", n),
+        "care": lambda uid, cl, n: _build_simple_greeting(uid, cl, "care", n),
+    }
+
+    builder = builders.get(template_type)
+    if builder:
+        html_body = await builder(user_id, llm_service.client, now)
+        return {"template_type": template_type, "html_preview": html_body[:500] + "...", "html_length": len(html_body)}
+    else:
+        return {"error": f"未知模板类型: {template_type}"}
+
+
+def _pick_subject_for_type(template_type: str) -> str:
+    """根据模板类型选择邮件主题"""
+    subjects = {
+        "morning": "☀️ Sunday 早安手报",
+        "fortune": "🥠 Sunday 今日心情签",
+        "note": "💌 Sunday 的小纸条",
+        "weekly": "📊 Sunday 一周报告",
+        "noon": "🍱 午安小憩~",
+        "evening": "🌙 晚安好梦~",
+        "care": "💕 想你了呢~",
+        "knowledge": "📚 Sunday 知识小卡片",
+    }
+    return subjects.get(template_type, "Sunday 给你发消息啦~ 💕")
+
+
+@app.post("/api/generate/report")
+async def generate_report_api(request: Request):
+    """生成 Word 报告 API"""
+    await verify_key(request)
+    body = await request.json()
+    topic = body.get("topic", "")
+    user_id = body.get("user_id", "daily")
+    send_email_flag = body.get("send_email", False)
+
+    if not topic:
+        raise HTTPException(400, "topic 不能为空呢~")
+
+    from app.file_generator import generate_word_report, encode_attachment
+
+    user_context = ""
+    try:
+        facts = memory_store.search(user_id, category="fact", limit=3)
+        user_context = "、".join([f.get("summary", f["content"]) for f in facts])
+    except Exception:
+        pass
+
+    docx_bytes, filename = await generate_word_report(
+        llm_service.client, topic, user_context
+    )
+
+    result = {"filename": filename, "size_bytes": len(docx_bytes)}
+
+    if send_email_flag:
+        attachment = encode_attachment(docx_bytes, filename)
+        from app.email_templates import _FALLBACK_THEMES, simple_greeting
+        palette = list(_FALLBACK_THEMES.values())[0]
+        html = simple_greeting(palette=palette, message=f"📝 你要的报告「{topic}」生成好啦~", greeting_type="care")
+        sent = send_email(subject=f"📝 Sunday 报告: {topic}", html_body=html, attachments=[attachment])
+        result["email_sent"] = sent
+
+    return result
+
+
+def _pick_subject(message: str) -> str:
+    """根据消息内容自动选择邮件主题 v2"""
+    if "早安" in message:
+        return "早安呀~ ☀️"
+    elif "晚安" in message:
+        return "晚安啦~ 🌙"
+    elif "中午" in message or "午饭" in message:
+        return "午餐时间到~ 🍱"
+    elif "晚上好" in message:
+        return "晚上好呀~ 🌙"
+    elif "想你了" in message or "好久不见" in message:
+        return "想你了呢~ 🥺"
+    else:
+        return "Sunday 给你发消息啦~ 💕"
+
+
+# ============================================================
+# 网页版日志面板（开发者用）
+# ============================================================
+@app.get("/dashboard")
+async def dashboard(request: Request):
+    """SundayOS 开发者面板 — 浏览器打开查看日志、改进、记忆"""
+    key = request.query_params.get("key", "")
+    if key != settings.api_key:
+        raise HTTPException(403, "需要 API Key")
+
+    tab = request.query_params.get("tab", "logs")
+    
+    logs = log_query(limit=50)
+    s = log_stats()
+    
+    # 改进计划
+    fb_items = memory_store.get_feedback("daily", status="open", limit=50)
+    
+    # 记忆
+    mem_items = memory_store.list_active_memories("daily", limit=50)
+    
+    # 日志表格
+    logs_html = ""
+    for l in logs:
+        icon = {"chat": "📨", "reply": "💬", "error": "❌", "memory": "🧠", "push": "📧"}.get(l["log_type"], "📌")
+        status_cls = "error" if l["status"] == "error" else ""
+        time_str = l["created_at"].replace("T", " ")[:19] if "T" in l["created_at"] else l["created_at"][:19]
+        logs_html += f"""<tr class="{status_cls}">
+            <td>{icon} {l['log_type']}</td>
+            <td>{l['source']}</td>
+            <td>{l['summary'][:100]}</td>
+            <td>{time_str}</td>
+        </tr>"""
+    
+    # 改进表格
+    fb_icons = {"improvement": "💡", "bug": "🐛", "todo": "📋"}
+    fb_html = ""
+    for f in fb_items:
+        icon = fb_icons.get(f["fb_type"], "📌")
+        fb_html += f"""<tr>
+            <td>{icon} {f['fb_type']}</td>
+            <td>{f['title'][:80]}</td>
+            <td>{f['source']}</td>
+            <td>{f['created_at'][:10]}</td>
+        </tr>"""
+    if not fb_html:
+        fb_html = '<tr><td colspan="4" style="text-align:center;color:#999;padding:30px;">暂无改进计划~ 在聊天中说「改进：xxx」来添加</td></tr>'
+    
+    # 记忆表格
+    mem_html = ""
+    for m in mem_items:
+        cat_label = MEMORY_CATEGORIES.get(m["category"], m["category"])
+        status_icon = "🟢" if m.get("status") == "active" else "📦"
+        status_text = "活跃" if m.get("status") == "active" else "归档"
+        imp_label = m.get('importance', 'medium')
+        mem_html += f"""<tr>
+            <td>{status_icon} {status_text}</td>
+            <td>{cat_label}</td>
+            <td>{m.get('summary', m['content'])[:60]}</td>
+            <td><span class="imp imp-{imp_label}">{imp_label}</span></td>
+            <td>{m.get('access_count', 0)}</td>
+            <td><code style="font-size:10px;">{m['id'][-8:]}</code></td>
+        </tr>"""
+    if not mem_html:
+        mem_html = '<tr><td colspan="6" style="text-align:center;color:#999;padding:30px;">暂无活跃记忆</td></tr>'
+
+    tabs_html = f"""
+    <div class="tabs">
+        <a href="?key={key}&tab=logs" class="tab {'active' if tab=='logs' else ''}">📊 运行日志</a>
+        <a href="?key={key}&tab=feedback" class="tab {'active' if tab=='feedback' else ''}">📝 改进计划 ({len(fb_items)})</a>
+        <a href="?key={key}&tab=memory" class="tab {'active' if tab=='memory' else ''}">🧠 记忆 ({len(mem_items)})</a>
+    </div>"""
+    
+    content = {
+        "logs": f"""<div class="stats">
+            <div class="stat"><div class="num">{s['today']['total']}</div><div class="label">今日消息</div></div>
+            <div class="stat"><div class="num">{s['today']['errors']}</div><div class="label">今日错误</div></div>
+            <div class="stat"><div class="num">{s['total']}</div><div class="label">总日志</div></div>
+            <div class="stat"><div class="num">{len(mem_items)}</div><div class="label">活跃记忆</div></div>
+            <div class="stat"><div class="num">{len(fb_items)}</div><div class="label">待改进</div></div>
+        </div>
+        <table><tr><th>类型</th><th>来源</th><th>内容</th><th>时间</th></tr>{logs_html}</table>""",
+        
+        "feedback": f"""<table><tr><th>类型</th><th>标题</th><th>来源</th><th>日期</th></tr>{fb_html}</table>""",
+        
+        "memory": f"""<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+            <span style="font-size:13px;color:#666;">共 {len(mem_items)} 条记忆</span>
+            <a href="/api/memory/export/csv?user_id=daily&key={key}" download 
+               style="margin-left:auto;padding:6px 14px;background:#ff6b8a;color:white;border-radius:8px;text-decoration:none;font-size:12px;">📥 导出 CSV</a>
+        </div>
+        <table><tr><th>状态</th><th>分类</th><th>摘要</th><th>重要性</th><th>访问</th><th>ID</th></tr>{mem_html}</table>""",
+    }[tab]
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SundayOS Dashboard</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: -apple-system, 'PingFang SC', sans-serif; background: #fef9f4; color: #333; padding: 20px; }}
+.header {{ background: linear-gradient(135deg, #ff6b8a, #ff8fab); color: white; padding: 20px; border-radius: 16px; margin-bottom: 20px; }}
+.header h1 {{ font-size: 24px; }}
+.header p {{ opacity: 0.9; margin-top: 4px; font-size: 14px; }}
+.tabs {{ display: flex; gap: 4px; margin-bottom: 20px; }}
+.tab {{ flex: 1; padding: 10px; text-align: center; border-radius: 10px; background: white; color: #666; text-decoration: none; font-size: 13px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }}
+.tab.active {{ background: #ff6b8a; color: white; }}
+.tab:hover {{ background: #fff0f3; }}
+.tab.active:hover {{ background: #ff6b8a; }}
+.stats {{ display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }}
+.stat {{ background: white; border-radius: 12px; padding: 16px; flex: 1; min-width: 80px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }}
+.stat .num {{ font-size: 28px; font-weight: bold; color: #ff6b8a; }}
+.stat .label {{ font-size: 11px; color: #999; margin-top: 4px; }}
+table {{ width: 100%; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }}
+.imp-critical {{ color: #e53e3e; font-weight: bold; }}
+.imp-high {{ color: #ed8936; font-weight: bold; }}
+.imp-medium {{ color: #718096; }}
+.imp-low {{ color: #a0aec0; }}
+.imp-trivial {{ color: #cbd5e0; }}
+th {{ background: #fff0f3; padding: 12px 16px; text-align: left; font-size: 13px; color: #666; }}
+td {{ padding: 10px 16px; font-size: 13px; border-bottom: 1px solid #f5f5f5; }}
+tr.error {{ background: #fff5f5; }}
+tr:hover {{ background: #fff8fa; }}
+.refresh {{ font-size: 12px; color: #999; text-align: center; margin-top: 16px; }}
+</style>
+</head>
+<body>
+<div class="header">
+    <h1>💕 SundayOS Dashboard</h1>
+    <p>开发者面板</p>
+</div>
+{tabs_html}
+{content}
+<p class="refresh">刷新页面查看最新数据</p>
+</body>
+</html>"""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=html)
+
+
+# ============================================================
+# API 路由 — 运行日志
+# ============================================================
+@app.get("/api/logs")
+async def get_logs(
+    request: Request,
+    log_type: str = Query("", description="日志类型: chat, reply, error, memory, push"),
+    user_id: str = Query("", description="用户ID"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """查询 Sunday 运行日志"""
+    await verify_key(request)
+    logs = log_query(log_type=log_type, user_id=user_id, limit=limit, offset=offset)
+    return {"count": len(logs), "logs": logs}
+
+
+@app.get("/api/logs/stats")
+async def get_log_stats(user_id: str = Query(""), request: Request = None):
+    """获取日志统计"""
+    await verify_key(request)
+    return log_stats(user_id=user_id)
+
+
+@app.get("/api/feedback")
+async def get_feedback(
+    request: Request,
+    user_id: str = Query("daily"),
+    status: str = Query("open"),
+    limit: int = Query(50),
+):
+    """获取改进计划列表（快捷指令用）"""
+    await verify_key(request)
+    items = memory_store.get_feedback(user_id, status=status, limit=limit)
+    return {"count": len(items), "items": items}
+# force rebuild Thu Jul  9 02:08:18 AM CST 2026
+
+# deploy 1783536301
+# force deploy Thu Jul  9 04:15:13 AM CST 2026

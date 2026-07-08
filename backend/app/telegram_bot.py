@@ -1,0 +1,785 @@
+"""
+SundayOS Telegram Bot 模块
+Sunday 在 Telegram 上跟你像朋友一样聊天 💕
+"""
+import asyncio
+import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.constants import ChatAction
+
+from app.config import settings
+from app.memory import memory_store
+from app.mailer import send_email
+from app.logger import log
+
+logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+TZ = ZoneInfo("Asia/Shanghai")
+
+TELEGRAM_TOKEN = settings.telegram_token
+
+# 存储每个用户的 session_id（用于记忆系统）
+USER_SESSIONS = {}
+
+
+def _get_user_id(update: Update) -> str:
+    """获取用户标识——统一使用 daily，和快捷指令共享记忆"""
+    # Telegram 用户映射到和快捷指令相同的 user_id
+    return "daily"
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /start 命令 """
+    user = update.effective_user
+    name = user.first_name or "朋友"
+    
+    # 尝试从记忆中获取昵称
+    user_id = _get_user_id(update)
+    from app.memory import memory_store
+    mems = memory_store.search(user_id, category="fact", limit=5)
+    known_name = None
+    for m in mems:
+        if "昵称" in m.get("tags", []) or "姓名" in m.get("tags", []):
+            for tag in m.get("tags", []):
+                if tag not in ["昵称", "姓名"] and len(tag) <= 5:
+                    known_name = tag
+                    break
+    
+    greeting = f"嗨{' ' + known_name if known_name else ' ' + name}~ 我是 Sunday 💕\n\n终于在这里见到你啦！以后就在这里聊天吧~ 想说什么都可以哦！"
+    
+    await update.message.reply_text(greeting)
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理用户消息"""
+    message_text = update.message.text or ""
+    if not message_text.strip():
+        return
+    
+    user_id = _get_user_id(update)
+    chat_id = update.effective_chat.id
+    print(f"🤖 Telegram 收到消息: user_id={user_id}, chat_id={chat_id}, text={message_text[:50]}")
+    
+    # 记录到日志系统
+    log("chat", user_id, "telegram", message_text[:100])
+
+    # 自动检测改进反馈
+    is_feedback = _detect_feedback(message_text, user_id)
+
+    # AI 驱动的意图判断：是否需要生成文件/报告/邮件发送
+    intent = await _ai_detect_intent(message_text, user_id)
+    if intent:
+        await _handle_ai_intent(update, context, intent, user_id)
+        return
+
+    # 检查记忆
+    from app.memory import memory_store
+    stats = memory_store.get_stats(user_id)
+    print(f"🤖 用户 {user_id} 的记忆数: {stats['total']}")
+    user = update.effective_user
+    display_name = user.first_name or "朋友"
+    
+    # 发送"正在输入..."状态
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    
+    # 记录用户消息到对话流
+    memory_store.add_conversation(user_id, "user", message_text)
+    
+    # 智能模型选择
+    from app.main import llm_service, select_model, SUNDAY_SYSTEM_PROMPT
+    model_id, chat_mode = select_model(message_text)
+    
+    # 构建 system prompt
+    memories = memory_store.get_context(user_id, message=message_text)
+    profile = _build_user_profile(user_id)
+    flow = memory_store.get_conversation_context(user_id, max_turns=10)
+    
+    system_prompt = SUNDAY_SYSTEM_PROMPT.format(
+        current_time=datetime.now(TZ).strftime("%Y年%m月%d日 %H:%M，周%u"),
+        user_profile=profile,
+        conversation_flow=flow or "（这是你们第一次在Telegram上聊天呢~）",
+        memories=memories,
+        chat_mode=chat_mode,
+    )
+    
+    # 联网搜索
+    from app.search import should_search, search_web, format_search_results
+    enhanced_message = message_text
+    if should_search(message_text):
+        try:
+            results = await asyncio.to_thread(search_web, message_text, 5)
+            if results and not (len(results) == 1 and "搜索失败" in results[0].get("title", "")):
+                enhanced_message = f"{message_text}\n\n[网络搜索结果]\n{format_search_results(results)}\n\n请基于以上搜索结果回答，保持Sunday的风格。"
+        except Exception:
+            pass
+    
+    # 调用 LLM — 使用更大的 max_tokens，让 Sunday 自由发挥
+    try:
+        # 根据内容智能选择回复长度
+        needs_long = _needs_long_reply(message_text)
+        reply_tokens = 2000 if needs_long else 800  # 聊天模式用 800（原来是 400）
+        if "专业模式" in chat_mode:
+            reply_tokens = llm_service.max_tokens  # 专业模式不限制
+
+        response = await llm_service.client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": enhanced_message},
+            ],
+            temperature=llm_service.temperature,
+            max_tokens=reply_tokens,
+        )
+        
+        reply = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+        
+        # 记录 Sunday 回复到对话流
+        memory_store.add_conversation(user_id, "assistant", reply, tokens)
+        
+        # 提取记忆
+        from app.main import extract_memories_from_message, _force_extract_info
+        asyncio.create_task(extract_memories_from_message(llm_service.client, message_text, user_id))
+        _force_extract_info(message_text, user_id)
+        
+        # 发送回复 — 智能分段
+        if is_feedback:
+            reply = "📝 已记录到改进日志~ " + reply
+        await _send_smart_reply(update, reply)
+        
+        # 记录日志
+        log("reply", user_id, "telegram", reply[:100], f"tokens={tokens} model={model_id}")
+        
+    except Exception as e:
+        logger.error(f"LLM 调用失败: {e}")
+        log("error", user_id, "telegram", f"LLM调用失败: {str(e)[:100]}")
+        await update.message.reply_text("唔... 刚刚走神了一下~ 再说一次好不好？🥺")
+
+
+# ============================================================
+# 智能分段回复
+# ============================================================
+
+TELEGRAM_MAX_LEN = 4000  # Telegram 单条消息上限（实际 4096，留 96 余量）
+
+
+def _needs_long_reply(text: str) -> bool:
+    """判断用户消息是否需要长回复"""
+    import re
+    long_patterns = [
+        r"写.*(?:文章|报告|故事|小说|作文|总结|分析|方案|计划)",
+        r"(?:详细|仔细|好好|认真).*?(?:说|讲|解释|分析|介绍)",
+        r"为什么|怎么(?:回事|办|做|样)|如何",
+        r"列出|列举|总结|归纳|整理",
+        r"(?:多|长|详细).*?(?:一点|一些|点)",
+    ]
+    for p in long_patterns:
+        if re.search(p, text):
+            return True
+    # 用户消息本身就长，说明在认真讨论
+    if len(text) > 80:
+        return True
+    return False
+
+
+def _should_split_reply(reply: str) -> bool:
+    """判断回复是否需要分段发送"""
+    # 1. 长度超过 Telegram 限制 → 必须拆
+    if len(reply) > TELEGRAM_MAX_LEN:
+        return True
+    # 2. 有明显的段落分隔 → 应该分段（更像真人聊天）
+    paragraphs = [p.strip() for p in reply.split("\n\n") if p.strip()]
+    if len(paragraphs) >= 3 and len(reply) > 300:
+        return True
+    # 3. 包含多个明显的话题切换标记
+    import re
+    topic_markers = re.findall(r"(?:另外|还有|对了|顺便|话说|哦对|不过|但是|然而)", reply)
+    if len(topic_markers) >= 2:
+        return True
+    return False
+
+
+def _split_into_chunks(reply: str) -> list[str]:
+    """将回复智能拆分为多条消息"""
+    # 先按段落分
+    paragraphs = [p.strip() for p in reply.split("\n\n") if p.strip()]
+
+    chunks = []
+    current = ""
+
+    for para in paragraphs:
+        # 如果当前段+新段不超过限制，合并
+        if len(current) + len(para) + 2 <= TELEGRAM_MAX_LEN:
+            current = (current + "\n\n" + para) if current else para
+        else:
+            if current:
+                chunks.append(current)
+            # 如果单段还是太长，按句子切
+            if len(para) > TELEGRAM_MAX_LEN:
+                sub_chunks = _split_long_paragraph(para)
+                chunks.extend(sub_chunks)
+                current = ""
+            else:
+                current = para
+
+    if current:
+        chunks.append(current)
+
+    # 如果只有一段，不拆分
+    if len(chunks) <= 1:
+        return [reply[:TELEGRAM_MAX_LEN]]
+
+    return chunks
+
+
+def _split_long_paragraph(text: str) -> list[str]:
+    """把超长段落按句子拆分"""
+    import re
+    sentences = re.split(r'(?<=[。！？\n])\s*', text)
+    chunks = []
+    current = ""
+    for s in sentences:
+        if len(current) + len(s) + 1 <= TELEGRAM_MAX_LEN:
+            current = (current + " " + s) if current else s
+        else:
+            if current:
+                chunks.append(current)
+            current = s[:TELEGRAM_MAX_LEN]
+    if current:
+        chunks.append(current)
+    return chunks or [text[:TELEGRAM_MAX_LEN]]
+
+
+async def _send_smart_reply(update: Update, reply: str):
+    """智能发送回复：让 AI 用双换行自然分段，代码只负责执行"""
+
+    # 用双换行（\n\n）拆分 —— AI 用空行表达"这里我想停一下"
+    segments = [s.strip() for s in reply.split("\n\n") if s.strip()]
+
+    # 只有一段 → 直接发，不做任何处理
+    if len(segments) <= 1:
+        await update.message.reply_text(reply)
+        return
+
+    # 多段 → 逐条发送，自然停顿
+    import random
+    for i, seg in enumerate(segments):
+        # 如果某段太长（>800字符），在里面找更细的断点
+        if len(seg) > 800:
+            sub_segments = _split_long_segment(seg)
+            for j, sub in enumerate(sub_segments):
+                await update.message.reply_text(sub)
+                if j < len(sub_segments) - 1:
+                    await asyncio.sleep(random.uniform(0.8, 1.5))
+        else:
+            await update.message.reply_text(seg)
+
+        # 段间停顿 —— 模拟真人在思考下一句
+        if i < len(segments) - 1:
+            # 根据内容决定停顿：问句等久一点，陈述快一点
+            if "?" in seg or "？" in seg:
+                delay = random.uniform(2.0, 3.5)  # 问句后停顿更久，等对方思考
+            elif len(seg) > 200:
+                delay = random.uniform(1.5, 2.5)  # 长段落后稍等
+            else:
+                delay = random.uniform(1.0, 2.0)  # 短段落快速接
+            await asyncio.sleep(delay)
+
+
+def _split_long_segment(text: str) -> list[str]:
+    """把超长段落按句子拆分，但保持语义完整"""
+    import re
+    # 按句号、问号、感叹号拆分
+    sentences = re.split(r'(?<=[。！？])\s*', text)
+    chunks = []
+    current = ""
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(current) + len(s) + 1 <= 800:
+            current = (current + s) if current else s
+        else:
+            if current:
+                chunks.append(current)
+            current = s
+    if current:
+        chunks.append(current)
+    return chunks or [text[:800]]
+
+
+def _build_user_profile(user_id: str) -> str:
+    """构建用户画像"""
+    stats = memory_store.get_stats(user_id)
+    if stats["total"] == 0:
+        return "这是一位新朋友，还不太了解呢~"
+    
+    parts = []
+    facts = memory_store.search(user_id, category="fact", limit=3)
+    for f in facts:
+        parts.append(f.get("summary", f["content"]))
+    
+    prefs = memory_store.search(user_id, category="preference", limit=3)
+    for p in prefs:
+        parts.append(p.get("summary", p["content"]))
+    
+    return "、".join(parts) if parts else f"已存储 {stats['total']} 条记忆"
+
+
+# ============================================================
+# AI 驱动的意图判断
+# ============================================================
+
+async def _ai_detect_intent(message_text: str, user_id: str) -> dict | None:
+    """
+    让 AI 判断用户意图，而不是用正则硬匹配。
+    返回 intent dict 或 None（无特殊意图，走正常聊天）。
+    """
+    from app.main import llm_service
+    from app.config import settings as app_settings
+
+    prompt = f"""你是一个意图分类器。请判断以下用户消息是否有特殊意图。
+
+用户消息：{message_text}
+
+请输出 JSON，只输出 JSON：
+{{
+  "has_intent": true/false,
+  "intent_type": "report" | "email_send" | "chart" | "none",
+  "topic": "提取的核心主题（如果意图是report/chart）",
+  "style": "academic" | "brief" | "creative" | "auto",
+  "send_email": true/false,
+  "explanation": "一句话解释你的判断（内部用，不发给用户）"
+}}
+
+意图说明：
+- "report": 用户想要生成一份正式文档/报告（word/pdf），明确说了"报告/文档/word/论文/总结"
+- "email_send": 用户想把之前生成的文件通过邮件发送
+- "chart": 用户想要生成图表
+- "none": 普通聊天，不需要特殊处理
+
+判断关键：
+- 如果用户说"写个情书/小作文/故事/小说"，且没有提到 word/报告/文档 → has_intent=false
+- 如果用户说"用word形式/生成word/写报告" → has_intent=true, intent_type="report"
+- 如果用户在文件生成后说"用邮件发给我" → intent_type="email_send"
+- style判断：学术话题→academic，创意写作→creative，日常→brief，不确定→auto
+- 不要被情感词汇误导，只关注用户是否真的想要文件/文档"""
+
+    try:
+        resp = await llm_service.client.chat.completions.create(
+            model=app_settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3, max_tokens=300,
+        )
+        text = resp.choices[0].message.content.strip()
+        import json, re
+        json_match = re.search(r'\{[\s\S]*\}', text)
+        if json_match:
+            intent = json.loads(json_match.group())
+            if intent.get("has_intent") and intent.get("intent_type") != "none":
+                return intent
+    except Exception as e:
+        logger.warning(f"AI意图判断失败: {e}")
+
+    return None
+
+
+async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, intent: dict, user_id: str):
+    """根据 AI 判断的意图执行对应操作"""
+    intent_type = intent.get("intent_type", "")
+    topic = intent.get("topic", "")
+    style = intent.get("style", "auto")
+    send_email_flag = intent.get("send_email", False)
+
+    if intent_type == "report":
+        if not topic:
+            await update.message.reply_text("嗯？你想要我写什么主题的报告呀？再说详细一点嘛~")
+            return
+
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+        await update.message.reply_text(f"📝 收到！正在为你撰写「{topic}」...\n🔍 搜索资料中，请稍等~")
+
+        try:
+            from app.file_generator import generate_word_report
+            from app.main import llm_service
+
+            user_context = ""
+            try:
+                facts = memory_store.search(user_id, category="fact", limit=3)
+                user_context = "、".join([f.get("summary", f["content"]) for f in facts])
+            except Exception:
+                pass
+
+            docx_bytes, filename = await generate_word_report(
+                llm_service.client, topic, user_context, style=style
+            )
+
+            if send_email_flag:
+                from app.file_generator import encode_attachment
+                from app.mailer import send_email
+                from app.email_templates import _FALLBACK_THEMES, simple_greeting
+                attachment = encode_attachment(docx_bytes, filename)
+                palette = list(_FALLBACK_THEMES.values())[0]
+                html = simple_greeting(palette=palette, message=f"📝 你要的报告「{topic}」生成好啦~", greeting_type="care")
+                email_sent = send_email(subject=f"📝 Sunday 报告: {topic}", html_body=html, attachments=[attachment])
+                if email_sent:
+                    await update.message.reply_text(f"✅ 报告已发送到邮箱！📎 {filename}")
+                else:
+                    await update.message.reply_document(document=docx_bytes, filename=filename,
+                        caption=f"📝 「{topic}」\n— Sunday 为你撰写 💕")
+            else:
+                await update.message.reply_document(document=docx_bytes, filename=filename,
+                    caption=f"📝 「{topic}」\n— Sunday 为你撰写 💕\n\n💡 想发邮件？下次说「用邮件发给我」就好~")
+
+            memory_store.add_conversation(user_id, "assistant", f"[已生成报告: {topic}]")
+
+        except Exception as e:
+            logger.error(f"报告生成失败: {e}")
+            await update.message.reply_text(f"❌ 报告生成出了点小问题：{str(e)[:100]}")
+
+    elif intent_type == "email_send":
+        await update.message.reply_text("📧 要发邮件的话，下次在请求报告时直接说「用邮件发给我」就好啦~")
+    elif intent_type == "chart":
+        await update.message.reply_text("📊 图表功能还在开发中，敬请期待~")
+
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """错误处理"""
+    logger.error(f"Telegram 错误: {context.error}")
+
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /stats 命令 — 查看今日数据 """
+    user_id = _get_user_id(update)
+    from app.logger import stats as log_stats
+    from app.memory import memory_store
+    
+    s = log_stats(user_id)
+    mem = memory_store.get_stats(user_id)
+    
+    text = f"""📊 Sunday 运行报告
+
+🤖 今日消息: {s['today']['total']} 条
+⚠️ 今日错误: {s['today']['errors']} 次
+
+🧠 总记忆数: {mem['total']} 条
+📋 记忆分类: {', '.join(mem['by_category'].keys()) if mem['by_category'] else '无'}"""
+    
+    await update.message.reply_text(text)
+
+
+async def logs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /logs 命令 — 查看最近日志 """
+    user_id = _get_user_id(update)
+    from app.logger import query as log_query
+    
+    logs = log_query(user_id=user_id, limit=5)
+    
+    if not logs:
+        await update.message.reply_text("还没有日志记录呢~")
+        return
+    
+    lines = ["📋 最近 5 条日志:"]
+    for l in logs:
+        icon = {"chat": "📨", "reply": "💬", "error": "❌", "memory": "🧠", "push": "📧"}.get(l["log_type"], "📌")
+        summary = l["summary"][:60]
+        lines.append(f"{icon} [{l['source']}] {summary}")
+    
+    await update.message.reply_text("\n".join(lines))
+
+
+async def feedback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /feedback 命令 — 查看改进列表 """
+    user_id = _get_user_id(update)
+    args = context.args
+    
+    if args and args[0] == "done":
+        # /feedback done <id>
+        if len(args) < 2:
+            await update.message.reply_text("用法: /feedback done <编号>\n比如: /feedback done fb_12345678")
+            return
+        fb_id = args[1]
+        memory_store.update_feedback(fb_id, status="done")
+        await update.message.reply_text(f"✅ {fb_id} 已标记为完成~")
+        return
+    
+    items = memory_store.get_feedback(user_id, status="open", limit=10)
+    
+    if not items:
+        await update.message.reply_text("还没有改进记录呢~ 跟我说「改进：xxx」或「bug：xxx」我就记下来！")
+        return
+    
+    icons = {"improvement": "💡", "bug": "🐛", "todo": "📋"}
+    lines = ["📝 改进日志:"]
+    for i, item in enumerate(items):
+        icon = icons.get(item["fb_type"], "📌")
+        lines.append(f"{icon} [{item['fb_type']}] {item['title']}")
+        lines.append(f"   id: {item['id']} | {item['created_at'][:10]}")
+    
+    await update.message.reply_text("\n".join(lines))
+
+
+async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /记忆 命令 — 管理记忆 """
+    user_id = _get_user_id(update)
+    args = context.args
+    
+    if not args:
+        mems = memory_store.list_active_memories(user_id, limit=15)
+        if not mems:
+            await update.message.reply_text("还没有记忆呢~")
+            return
+        
+        grouped = {}
+        for m in mems:
+            cat = m["category"]
+            if cat not in grouped:
+                grouped[cat] = []
+            grouped[cat].append(m)
+        
+        lines = ["🧠 我的记忆库:"]
+        for cat, items in grouped.items():
+            cat_label = MEMORY_CATEGORIES.get(cat, cat)
+            lines.append(f"\n{cat_label}:")
+            for item in items:
+                summary = item.get("summary") or item["content"]
+                lines.append(f"  [{item['id'][-8:]}] {summary[:50]}")
+        
+        lines.append("\n💡 /记忆 归档 <编号>")
+        lines.append("💡 /记忆 恢复 <编号>")
+        lines.append("💡 /记忆 归档列表")
+        
+        await update.message.reply_text("\n".join(lines))
+        return
+    
+    action = args[0]
+    
+    if action == "归档" and len(args) >= 2:
+        mem_id = args[1]
+        if not mem_id.startswith("mem_"):
+            mem_id = f"mem_{mem_id}"
+        if memory_store.set_memory_status(mem_id, "archived"):
+            await update.message.reply_text(f"✅ {mem_id[-8:]} 已归档~")
+        else:
+            await update.message.reply_text("没找到这条记忆呢~")
+    
+    elif action == "恢复" and len(args) >= 2:
+        mem_id = args[1]
+        if not mem_id.startswith("mem_"):
+            mem_id = f"mem_{mem_id}"
+        if memory_store.set_memory_status(mem_id, "active"):
+            await update.message.reply_text(f"✅ {mem_id[-8:]} 已恢复~")
+        else:
+            await update.message.reply_text("没找到这条记忆呢~")
+    
+    elif action == "归档列表":
+        mems = memory_store.list_archived_memories(user_id, limit=15)
+        if not mems:
+            await update.message.reply_text("没有已归档的记忆~")
+            return
+        lines = ["📦 已归档记忆:"]
+        for m in mems:
+            summary = m.get("summary") or m["content"]
+            lines.append(f"  [{m['id'][-8:]}] {summary[:50]}")
+        await update.message.reply_text("\n".join(lines))
+    
+    else:
+        await update.message.reply_text("用法:\n/记忆 → 查看\n/记忆 归档 <编号>\n/记忆 恢复 <编号>\n/记忆 归档列表")
+
+
+# ============================================================
+# /report — 生成 Word 报告
+# ============================================================
+
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """生成报告并通过 Telegram 发送"""
+    user_id = _get_user_id(update)
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            "📝 **Sunday 报告生成器**\n\n"
+            "用法：`/report 主题 [--email]`\n\n"
+            "例如：\n"
+            "`/report 量子计算在药物研发中的应用`\n"
+            "`/report AI发展趋势 --email`（发到邮箱）",
+            parse_mode="Markdown"
+        )
+        return
+
+    # 解析参数
+    send_via_email = "--email" in args
+    topic = " ".join([a for a in args if a != "--email"])
+
+    await update.message.reply_text(f"📝 正在为你撰写关于「{topic}」的报告...\n🔍 搜索资料中...")
+
+    try:
+        from app.file_generator import generate_word_report, encode_attachment
+        from app.main import llm_service
+
+        # 获取用户背景
+        user_context = ""
+        try:
+            facts = memory_store.search(user_id, category="fact", limit=3)
+            user_context = "、".join([f.get("summary", f["content"]) for f in facts])
+        except Exception:
+            pass
+
+        docx_bytes, filename = await generate_word_report(
+            llm_service.client, topic, user_context, style="auto"
+        )
+
+        if send_via_email:
+            from app.mailer import send_email
+            from app.email_templates import _FALLBACK_THEMES, simple_greeting
+            attachment = encode_attachment(docx_bytes, filename)
+            palette = _FALLBACK_THEMES.get("sakura", list(_FALLBACK_THEMES.values())[0])
+            html = simple_greeting(palette=palette, message=f"📝 你要的报告「{topic}」已经生成好啦~ 请查收附件哦！", greeting_type="care")
+            sent = send_email(subject=f"📝 Sunday 报告: {topic}", html_body=html, attachments=[attachment])
+            if sent:
+                await update.message.reply_text(f"✅ 报告已发送到你的邮箱！\n📎 附件：{filename}")
+            else:
+                await update.message.reply_text("❌ 邮件发送失败，改为 Telegram 发送...")
+                await update.message.reply_document(
+                    document=docx_bytes, filename=filename,
+                    caption=f"📝 {topic}\n— Sunday 为你撰写"
+                )
+        else:
+            await update.message.reply_document(
+                document=docx_bytes, filename=filename,
+                caption=f"📝 {topic}\n— Sunday 为你撰写 💕"
+            )
+
+    except Exception as e:
+        logger.error(f"报告生成失败: {e}")
+        await update.message.reply_text(f"❌ 报告生成失败：{str(e)[:200]}")
+
+
+# ============================================================
+# /knowledge — 查看知识库
+# ============================================================
+
+async def knowledge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看今日/最近的知识推送"""
+    user_id = _get_user_id(update)
+
+    kbs = memory_store.get_knowledge(user_id, limit=5)
+    if not kbs:
+        await update.message.reply_text("📚 还没有知识推送呢~ 等等Sunday给你发小知识吧！")
+        return
+
+    lines = ["📚 **Sunday 知识库**\n"]
+    for kb in kbs[:5]:
+        kb_type = kb.get("kb_type", "")
+        type_emoji = {"science_fact": "🧪", "daily_word": "📚", "thought": "💡", "inspiration": "🎨"}.get(kb_type, "📌")
+        lines.append(f"{type_emoji} **{kb['title']}**")
+        lines.append(f"   {kb['content'][:80]}...")
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+def _detect_feedback(message: str, user_id: str) -> bool:
+    """自动检测消息中是否包含改进反馈，并进行质量检查"""
+    import re
+
+    detected = None
+
+    # 改进/建议
+    m = re.search(r'(?:改进|优化|建议|想法)[：:]\s*(.+)', message)
+    if m:
+        detected = ("improvement", m.group(1).strip(), message[:200])
+
+    # Bug
+    m = re.search(r'(?:bug|Bug|BUG|问题|报错)[：:]\s*(.+)', message)
+    if m:
+        detected = ("bug", m.group(1).strip(), message[:200])
+
+    # TODO
+    m = re.search(r'(?:TODO|todo|待办|要做)[：:]\s*(.+)', message)
+    if m:
+        detected = ("todo", m.group(1).strip(), message[:200])
+
+    if detected:
+        fb_type, title, detail = detected
+
+        # 质量检查：过滤垃圾反馈
+        if not _is_quality_feedback(title, detail):
+            return False
+
+        fb_id = memory_store.add_feedback(user_id, fb_type, title, detail)
+        return True
+
+    return False
+
+
+def _is_quality_feedback(title: str, detail: str) -> bool:
+    """检查反馈质量，防止误触发"""
+    # 标题太短或太长
+    if not title or len(title) < 3 or len(title) > 200:
+        return False
+
+    # 标题只是语气词/无意义内容
+    meaningless = ["嗯", "啊", "哦", "哈", "呢", "吧", "呀", "啦", "~", "…", "..."]
+    if all(c in meaningless for c in title):
+        return False
+
+    # 标题包含问号 → 不是反馈，是问题
+    if "?" in title or "？" in title:
+        return False
+
+    # 标题是闲聊内容（不是改进建议）
+    chat_patterns = ["你好", "在吗", "在干嘛", "吃了吗", "睡了吗", "晚安", "早安"]
+    if any(p in title for p in chat_patterns):
+        return False
+
+    return True
+
+
+def start_telegram_bot():
+    """启动 Telegram Bot（返回 application 对象，在主线程事件循环中运行）"""
+    print("🤖 start_telegram_bot() 被调用")
+    print(f"🤖 TELEGRAM_TOKEN: {'已设置' if TELEGRAM_TOKEN else '未设置!!!'}")
+    
+    if not TELEGRAM_TOKEN:
+        print("🤖 Telegram Token 未配置，Bot 未启动")
+        return None
+    
+    try:
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # 注册处理器
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("stats", stats_cmd))
+        app.add_handler(CommandHandler("logs", logs_cmd))
+        app.add_handler(CommandHandler("feedback", feedback_cmd))
+        app.add_handler(CommandHandler("memory", memory_cmd))
+        # app.add_handler(CommandHandler("记忆", memory_cmd))  # Telegram 命令不支持中文
+        app.add_handler(CommandHandler("report", report_cmd))
+        app.add_handler(CommandHandler("knowledge", knowledge_cmd))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        app.add_error_handler(error_handler)
+        
+        print("🤖 Sunday Telegram Bot 已构建，等待启动轮询...")
+        
+        return app
+    except Exception as e:
+        print(f"🤖 Telegram Bot 构建失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+async def run_telegram_bot(app: Application):
+    """在主事件循环中运行 Telegram Bot 轮询"""
+    if app is None:
+        return
+    print("🤖 Sunday Telegram Bot 开始轮询...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    print("🤖 Sunday Telegram Bot 轮询已启动！")

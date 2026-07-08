@@ -5,7 +5,10 @@ import json
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo("Asia/Shanghai")
 from pathlib import Path
 from typing import Optional
 
@@ -36,13 +39,14 @@ def init_db():
             access_count INTEGER DEFAULT 0,
             decay_factor REAL DEFAULT 1.0,
             related_to TEXT DEFAULT '',
+            status TEXT DEFAULT 'active',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_accessed TEXT,
             archived INTEGER DEFAULT 0
         );
 
-        CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, archived);
+        CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, status);
         CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(user_id, category);
         CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(user_id, importance);
         CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
@@ -75,6 +79,42 @@ def init_db():
         );
 
         CREATE INDEX IF NOT EXISTS idx_flow_user_time ON conversation_flow(user_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS push_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            push_type TEXT NOT NULL,
+            message TEXT DEFAULT '',
+            pushed_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_push_user_type ON push_log(user_id, push_type, pushed_at DESC);
+
+        CREATE TABLE IF NOT EXISTS knowledge_base (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            kb_type TEXT NOT NULL DEFAULT 'science_fact',
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tags TEXT DEFAULT '[]',
+            source_url TEXT DEFAULT '',
+            image_url TEXT DEFAULT '',
+            pushed_at TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_kb_user ON knowledge_base(user_id, pushed_at DESC);
+
+        CREATE TABLE IF NOT EXISTS feedback (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            fb_type TEXT NOT NULL DEFAULT 'improvement',
+            title TEXT NOT NULL,
+            detail TEXT DEFAULT '',
+            source TEXT DEFAULT 'telegram',
+            status TEXT DEFAULT 'open',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id, status);
     """)
 
     # 自动迁移：为新列添加缺失的列
@@ -83,6 +123,10 @@ def init_db():
     conn.commit()
     conn.close()
 
+    # 初始化日志表
+    from app.logger import init_log_table
+    init_log_table()
+
 
 def _migrate(conn: sqlite3.Connection):
     """自动检测并添加缺失的列"""
@@ -90,6 +134,7 @@ def _migrate(conn: sqlite3.Connection):
     migrations = {
         "summary": "TEXT DEFAULT ''",
         "related_to": "TEXT DEFAULT ''",
+        "status": "TEXT DEFAULT 'active'",
     }
     for col, col_type in migrations.items():
         if col not in existing:
@@ -144,13 +189,18 @@ MEMORY_EXTRACTION_PROMPT = """你是 Sunday 的记忆系统。分析用户的消
 - medium: 日常偏好、一般行程、短期计划、普通关系
 - low: 临时笔记、一次性事件
 
-## 提取原则
-1. 只提取真正值得长期记住的信息，闲聊和情绪表达不要提取
-2. **用户自称的名字/昵称一定要记住，无论多奇怪（如"香蕉麻辣酱"也要记）**
-3. 每条记忆用一句简洁完整的话概括（不要照搬原话）
-4. tags 是关键词标签，用于未来检索（用中文）
-5. 如果一句话包含多个独立信息，拆成多条记忆
-6. 如果消息不包含任何可记忆内容，返回空数组 []
+## 提取原则（极其重要！）
+1. **只提取真正有价值的信息**。闲聊、情绪表达、玩笑、临时话题不要提取
+2. **用户自称的名字/昵称要记**，但必须是用户明确说"我叫XX"或"你可以叫我XX"，不要从上下文猜测
+3. **不要提取模糊/不完整的信息**：
+   - 错误："昵称是啥"（这不是信息，是问题）
+   - 错误："用户称Sunday为…？"（不完整，有问号）
+   - 错误："你想叫我啥"（这不是事实，是反问）
+4. 每条记忆用一句简洁完整的话概括（不要照搬原话，不要带问号）
+5. tags 是关键词标签，用于未来检索（用中文）
+6. 如果一句话包含多个独立信息，拆成多条记忆
+7. 如果消息不包含任何可记忆内容，返回空数组 []
+8. **质量检查**：如果 summary 里有问号、省略号、或者明显是不完整的句子，不要提取
 
 ## 输入
 用户消息: {message}
@@ -189,7 +239,7 @@ class MemoryStore:
             # 更新已存在的记忆
             return self._refresh_existing(existing["id"], content, summary, tags)
 
-        now = datetime.now().isoformat()
+        now = datetime.now(TZ).isoformat()
         mem_id = f"mem_{uuid.uuid4().hex[:12]}"
         tags_json = json.dumps(tags or [], ensure_ascii=False)
 
@@ -263,7 +313,7 @@ class MemoryStore:
     def _refresh_existing(self, mem_id: str, content: str, summary: str, tags: list[str]) -> dict:
         """刷新已存在的记忆（更新时间、增加访问计数）"""
         conn = get_db()
-        now = datetime.now().isoformat()
+        now = datetime.now(TZ).isoformat()
         tags_json = json.dumps(tags or [], ensure_ascii=False)
         conn.execute(
             """UPDATE memories SET content = ?, summary = ?, tags = ?, updated_at = ?,
@@ -289,6 +339,7 @@ class MemoryStore:
         category: str = "",
         tags: list[str] = None,
         importance: str = "",
+        status: str = "active",
         limit: int = 20,
         offset: int = 0,
         include_archived: bool = False,
@@ -299,6 +350,10 @@ class MemoryStore:
 
         if not include_archived:
             conditions.append("archived = 0")
+        
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
 
         if category:
             conditions.append("category = ?")
@@ -390,7 +445,7 @@ class MemoryStore:
                     updates[k] = kwargs[k]
 
         if updates:
-            updates["updated_at"] = datetime.now().isoformat()
+            updates["updated_at"] = datetime.now(TZ).isoformat()
             set_clause = ", ".join(f"{k} = ?" for k in updates)
             conn.execute(f"UPDATE memories SET {set_clause} WHERE id = ?", list(updates.values()) + [mem_id])
             conn.commit()
@@ -417,7 +472,7 @@ class MemoryStore:
         conn = get_db()
         conn.execute(
             "UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-            (datetime.now().isoformat(), mem_id),
+            (datetime.now(TZ).isoformat(), mem_id),
         )
         conn.commit()
         conn.close()
@@ -425,7 +480,7 @@ class MemoryStore:
     def link_memories(self, user_id: str, mem_id_a: str, mem_id_b: str, relation: str = "related"):
         """关联两条记忆"""
         conn = get_db()
-        now = datetime.now().isoformat()
+        now = datetime.now(TZ).isoformat()
         conn.execute(
             """INSERT OR IGNORE INTO memory_links (user_id, memory_id_a, memory_id_b, relation, created_at)
                VALUES (?, ?, ?, ?, ?)""",
@@ -501,7 +556,7 @@ class MemoryStore:
 
     def apply_decay(self, user_id: str, days: int = 30):
         conn = get_db()
-        threshold = (datetime.now() - timedelta(days=days)).isoformat()
+        threshold = (datetime.now(TZ) - timedelta(days=days)).isoformat()
         conn.execute(
             """UPDATE memories SET decay_factor = decay_factor * 0.9
                WHERE user_id = ? AND created_at < ? AND importance IN ('low', 'medium')
@@ -526,7 +581,7 @@ class MemoryStore:
     def add_conversation(self, user_id: str, role: str, content: str, tokens: int = 0):
         """记录一条对话到对话流"""
         conn = get_db()
-        now = datetime.now().isoformat()
+        now = datetime.now(TZ).isoformat()
         conn.execute(
             "INSERT INTO conversation_flow (user_id, role, content, tokens_used, created_at) VALUES (?, ?, ?, ?, ?)",
             (user_id, role, content, tokens, now),
@@ -541,7 +596,7 @@ class MemoryStore:
            ❄️ >72h：不注入（重要信息已在长期记忆中）
         """
         conn = get_db()
-        now = datetime.now()
+        now = datetime.now(TZ)
         hot_cutoff = (now - timedelta(hours=24)).isoformat()
         warm_cutoff = (now - timedelta(hours=72)).isoformat()
 
@@ -604,12 +659,216 @@ class MemoryStore:
     def cleanup_old_conversations(self, user_id: str, keep_hours: int = 72):
         """清理超过指定时间的对话流"""
         conn = get_db()
-        cutoff = (datetime.now() - timedelta(hours=keep_hours)).isoformat()
+        cutoff = (datetime.now(TZ) - timedelta(hours=keep_hours)).isoformat()
         conn.execute("DELETE FROM conversation_flow WHERE user_id = ? AND created_at < ?", (user_id, cutoff))
         deleted = conn.total_changes
         conn.commit()
         conn.close()
         return deleted
+
+    # ============================================================
+    # 推送追踪（避免重复推送）
+    # ============================================================
+    def _get_last_push(self, user_id: str, push_type: str) -> datetime | None:
+        """获取上次推送时间"""
+        conn = get_db()
+        row = conn.execute(
+            "SELECT pushed_at FROM push_log WHERE user_id = ? AND push_type = ? ORDER BY pushed_at DESC LIMIT 1",
+            (user_id, push_type),
+        ).fetchone()
+        conn.close()
+        if row:
+            try:
+                return datetime.fromisoformat(row["pushed_at"])
+            except Exception:
+                return None
+        return None
+
+    def _record_push(self, user_id: str, push_type: str, message: str = ""):
+        """记录一次推送"""
+        conn = get_db()
+        now = datetime.now(TZ).isoformat()
+        conn.execute(
+            "INSERT INTO push_log (user_id, push_type, message, pushed_at) VALUES (?, ?, ?, ?)",
+            (user_id, push_type, message, now),
+        )
+        conn.commit()
+        conn.close()
+
+    def _get_last_interaction(self, user_id: str) -> datetime | None:
+        """获取用户最后一次互动时间"""
+        conn = get_db()
+        row = conn.execute(
+            "SELECT created_at FROM conversation_flow WHERE user_id = ? AND role = 'user' ORDER BY created_at DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        conn.close()
+        if row:
+            try:
+                return datetime.fromisoformat(row["created_at"])
+            except Exception:
+                return None
+        return None
+
+    def get_daily_push_count(self, user_id: str) -> int:
+        """获取今日已推送次数"""
+        conn = get_db()
+        today = datetime.now(TZ).strftime("%Y-%m-%d")
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM push_log WHERE user_id = ? AND pushed_at >= ?",
+            (user_id, today),
+        ).fetchone()
+        conn.close()
+        return row["cnt"] if row else 0
+
+    def get_memories_since(self, user_id: str, since_days: int = 7) -> list[dict]:
+        """获取指定天数内的记忆（用于周报等）"""
+        conn = get_db()
+        since_date = (datetime.now(TZ) - timedelta(days=since_days)).isoformat()
+        rows = conn.execute(
+            "SELECT * FROM memories WHERE user_id = ? AND created_at >= ? ORDER BY access_count DESC",
+            (user_id, since_date),
+        ).fetchall()
+        conn.close()
+        return [self._row_to_dict(r) for r in rows]
+
+    def get_conversation_count_since(self, user_id: str, since_days: int = 7) -> int:
+        """获取指定天数内的对话轮数"""
+        conn = get_db()
+        since_date = (datetime.now(TZ) - timedelta(days=since_days)).isoformat()
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM conversation_flow WHERE user_id = ? AND role = 'user' AND created_at >= ?",
+            (user_id, since_date),
+        ).fetchone()
+        conn.close()
+        return row["cnt"] if row else 0
+
+    # ============================================================
+    # 知识库
+    # ============================================================
+    def add_knowledge(self, user_id: str, kb_type: str, title: str, content: str,
+                      tags: list = None, source_url: str = "", image_url: str = "") -> str:
+        """添加一条知识到知识库"""
+        conn = get_db()
+        now = datetime.now(TZ).isoformat()
+        kb_id = f"kb_{uuid.uuid4().hex[:8]}"
+        conn.execute(
+            "INSERT INTO knowledge_base (id, user_id, kb_type, title, content, tags, source_url, image_url, pushed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (kb_id, user_id, kb_type, title, content,
+             json.dumps(tags or [], ensure_ascii=False), source_url, image_url, now, now),
+        )
+        conn.commit()
+        conn.close()
+        return kb_id
+
+    def get_knowledge(self, user_id: str, kb_type: str = None, limit: int = 10) -> list[dict]:
+        """获取知识库条目"""
+        conn = get_db()
+        if kb_type:
+            rows = conn.execute(
+                "SELECT * FROM knowledge_base WHERE user_id = ? AND kb_type = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, kb_type, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM knowledge_base WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["tags"] = json.loads(d.get("tags", "[]"))
+            result.append(d)
+        return result
+
+    def get_today_knowledge_count(self, user_id: str) -> int:
+        """获取今日已推送知识条数"""
+        conn = get_db()
+        today = datetime.now(TZ).strftime("%Y-%m-%d")
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM knowledge_base WHERE user_id = ? AND pushed_at >= ?",
+            (user_id, today),
+        ).fetchone()
+        conn.close()
+        return row["cnt"] if row else 0
+
+    # ============================================================
+    # 改进反馈系统
+    # ============================================================
+    def add_feedback(self, user_id: str, fb_type: str, title: str, detail: str = "", source: str = "telegram") -> str:
+        """添加一条改进反馈"""
+        conn = get_db()
+        now = datetime.now(TZ).isoformat()
+        fb_id = f"fb_{uuid.uuid4().hex[:8]}"
+        conn.execute(
+            """INSERT INTO feedback (id, user_id, fb_type, title, detail, source, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+            (fb_id, user_id, fb_type, title, detail, source, now, now),
+        )
+        conn.commit()
+        conn.close()
+        return fb_id
+
+    def get_feedback(self, user_id: str, fb_type: str = "", status: str = "open", limit: int = 20) -> list[dict]:
+        """查询改进反馈"""
+        conn = get_db()
+        conditions = ["user_id = ?"]
+        params = [user_id]
+        if fb_type:
+            conditions.append("fb_type = ?")
+            params.append(fb_type)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        
+        rows = conn.execute(
+            f"SELECT * FROM feedback WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def update_feedback(self, fb_id: str, **kwargs) -> bool:
+        """更新反馈状态"""
+        conn = get_db()
+        allowed = ["status", "title", "detail"]
+        updates = {k: kwargs[k] for k in allowed if k in kwargs}
+        if not updates:
+            conn.close()
+            return False
+        updates["updated_at"] = datetime.now(TZ).isoformat()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        conn.execute(f"UPDATE feedback SET {set_clause} WHERE id = ?", list(updates.values()) + [fb_id])
+        conn.commit()
+        conn.close()
+        return True
+
+    # ============================================================
+    # 记忆状态管理
+    # ============================================================
+    def set_memory_status(self, mem_id: str, status: str) -> bool:
+        """修改记忆状态: active / archived"""
+        if status not in ("active", "archived"):
+            return False
+        conn = get_db()
+        now = datetime.now(TZ).isoformat()
+        conn.execute(
+            "UPDATE memories SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now, mem_id),
+        )
+        updated = conn.total_changes > 0
+        conn.commit()
+        conn.close()
+        return updated
+
+    def list_active_memories(self, user_id: str, limit: int = 20) -> list[dict]:
+        """列出所有 active 记忆，按分类分组"""
+        return self.search(user_id, status="active", limit=limit)
+
+    def list_archived_memories(self, user_id: str, limit: int = 20) -> list[dict]:
+        """列出所有 archived 记忆"""
+        return self.search(user_id, status="archived", limit=limit)
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         d = dict(row)

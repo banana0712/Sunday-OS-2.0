@@ -35,6 +35,17 @@ class Settings(BaseSettings):
         alias="ASSISTANT_PERSONALITY",
     )
 
+    # 邮件推送（Resend HTTP API）
+    resend_api_key: str = Field(default="", alias="RESEND_API_KEY")
+    resend_from_email: str = Field(default="", alias="RESEND_FROM_EMAIL")
+    push_email: str = Field(default="", alias="PUSH_EMAIL")
+
+    # IMAP 接收邮件（iCloud 实时监听）
+    imap_password: str = Field(default="", alias="IMAP_PASSWORD")
+
+    # Telegram Bot
+    telegram_token: str = Field(default="", alias="TELEGRAM_TOKEN")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
