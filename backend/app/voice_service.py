@@ -217,8 +217,13 @@ class VoiceService:
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(DOUBAO_TTS_URL, headers=headers, json=payload)
-            resp.raise_for_status()
+            status = resp.status_code
             body = resp.text
+            print(f"🎤 [TTS] HTTP {status}, body first 300 chars: {body[:300]}")
+
+            if status != 200:
+                raise RuntimeError(f"TTS HTTP {status}: {body[:300]}")
+            resp.raise_for_status()
 
         audio_chunks = []
         for line in body.split("\n"):
@@ -231,8 +236,9 @@ class VoiceService:
                 continue
 
             code = parsed.get("code")
-            if code == 0 and "data" in parsed:
-                audio_chunks.append(base64.b64decode(parsed["data"]))
+            data_val = parsed.get("data")
+            if code == 0 and data_val:
+                audio_chunks.append(base64.b64decode(data_val))
             elif code == 20000000:
                 break  # 流结束
             elif code is not None and code != 0:
