@@ -341,7 +341,7 @@ async def _handle_email_push(update, context, chat_id, template_type="morning", 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 f"{base_url.rstrip('/')}/api/push/send",
-                headers={"Authorization": f"Bearer {settings.api_key}"},
+                headers={"X-API-Key": settings.api_key},
                 json={
                     "user_id": "daily",
                     "template_type": template_type,
