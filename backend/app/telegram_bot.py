@@ -129,8 +129,64 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         memory_store.add_conversation(user_id, "user", f"[语音] {text}")
         log("chat", user_id, "telegram", f"[语音] {text[:100]}")
 
-        # 5. LLM 生成回复（期间保持录音中状态）
-        # 注意：_process_message_text 内部会发 TYPING，我们需要覆盖它
+        # 5. 检测唱歌请求 — 在 LLM 调用前拦截，用专用 prompt 生成歌词
+        sing_keywords = ["唱歌", "唱一首", "唱个歌", "唱支歌", "唱什么", "唱一个", "来一首", "来一个", "唱来听听", "唱首歌"]
+        is_singing = any(kw in text for kw in sing_keywords)
+
+        if is_singing:
+            print(f"🎵 [MUSIC] 检测到唱歌请求: '{text}'")
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+            try:
+                # 用专用 prompt 让 LLM 生成歌词
+                from app.main import llm_service
+                song_prompt = f"""请为「{text}」这个请求创作一首简短可爱的歌词。
+要求：
+- 4-8句歌词，每句一行，用换行分隔
+- 像J-Pop或动漫主题曲风格，甜美可爱
+- 用[verse]和[chorus]标记段落
+- 只输出歌词，不要任何其他文字、解释或括号描述
+
+示例格式：
+[verse]
+今天阳光真好啊
+小鸟在窗外唱歌
+[chorus]
+啦啦啦好开心呀
+和你在一起的每一天"""
+
+                song_resp = await llm_service.client.chat.completions.create(
+                    model=llm_service.model_fast,
+                    messages=[{"role": "user", "content": song_prompt}],
+                    max_tokens=300,
+                    temperature=0.9,
+                )
+                lyrics = song_resp.choices[0].message.content or ""
+                print(f"🎵 [MUSIC] LLM 歌词: {lyrics[:150]}")
+
+                # 调 MiniMax 生成歌曲
+                audio_reply = await voice_service.generate_music(
+                    lyrics=lyrics,
+                    style="甜美可爱的女声，轻快J-Pop，动漫主题曲风格，温柔甜美"
+                )
+                print(f"🎵 [MUSIC] 歌曲生成完成，发送中...")
+
+                import io
+                voice_file = io.BytesIO(audio_reply)
+                voice_file.name = "song.mp3"
+                await context.bot.send_voice(
+                    chat_id=chat_id,
+                    voice=voice_file,
+                    caption=""
+                )
+                _record_voice_usage(user_id)
+                return  # 唱歌完成，不走下面的普通流程
+            except Exception as music_e:
+                print(f"🎵 [MUSIC] 失败: {music_e}")
+                # 降级：让 LLM 正常回复 + TTS
+                await update.message.reply_text("唔... 唱歌引擎出了点小问题，下次再唱给你听~ 🥺")
+                return
+
+        # 6. 正常流程：LLM 生成回复
         reply = await _process_message_text(text, user_id, update, context)
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
@@ -138,30 +194,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("嗯... 刚才想说什么来着~ 🥺")
             return
 
-        # 6. TTS 合成语音
+        # 7. TTS 合成语音
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
         try:
-            # 检测唱歌请求
-            sing_keywords = ["唱歌", "唱一首", "唱个歌", "唱支歌", "唱什么", "唱一个", "来一���", "来一个", "唱来听听"]
-            is_singing = any(kw in text for kw in sing_keywords)
-
-            if is_singing:
-                print(f"🎵 [MUSIC] 检测到唱歌请求，使用 MiniMax Music API")
-                # 从回复中提取歌词（LLM 应该生成了歌词）
-                # 清理括号动作描述，保留纯歌词
-                import re
-                lyrics = re.sub(r'[（(].*?[）)]', '', reply)
-                lyrics = lyrics.strip()
-                # 用换行符分隔（LLM 应该用换行表示每句）
-                if '\n' not in lyrics:
-                    lyrics = lyrics.replace('。', '。\n').replace('！', '！\n').replace('？', '？\n')
-                audio_reply = await voice_service.generate_music(
-                    lyrics=lyrics,
-                    style="甜美可爱的女声，轻快J-Pop风格，像动漫主题曲，温柔甜美"
-                )
-                print(f"🎵 [MUSIC] 歌曲生成完成，发送中...")
-            else:
-                audio_reply = await voice_service.synthesize(reply, emotion="sweet")
+            audio_reply = await voice_service.synthesize(reply, emotion="sweet")
 
             import io
             voice_file = io.BytesIO(audio_reply)
