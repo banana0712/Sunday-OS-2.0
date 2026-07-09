@@ -46,15 +46,16 @@ class Settings(BaseSettings):
     # Telegram Bot
     telegram_token: str = Field(default="", alias="TELEGRAM_TOKEN")
 
-    # 语音服务（豆包 ASR + TTS）
-    voice_asr_app_key: str = Field(default="", alias="DOUBAO_ASR_APP_KEY")
-    voice_asr_access_key: str = Field(default="", alias="DOUBAO_ASR_ACCESS_KEY")
-    voice_asr_resource_id: str = Field(default="volc.seedasr.sauc.duration", alias="DOUBAO_ASR_RESOURCE_ID")
-    voice_tts_app_id: str = Field(default="", alias="DOUBAO_TTS_APP_ID")
-    voice_tts_access_key: str = Field(default="", alias="DOUBAO_TTS_ACCESS_KEY")
+    # 语音服务（豆包 ASR + TTS）— v2 新版控制台鉴权
+    voice_asr_api_key: str = Field(default="", alias="DOUBAO_ASR_API_KEY")
+    voice_asr_resource_id: str = Field(default="volc.seedasr.auc", alias="DOUBAO_ASR_RESOURCE_ID")
+    voice_tts_api_key: str = Field(default="", alias="DOUBAO_TTS_API_KEY")
+    voice_tts_resource_id: str = Field(default="seed-tts-2.0", alias="DOUBAO_TTS_RESOURCE_ID")
     voice_tts_speaker: str = Field(default="zh_female_vv_uranus_bigtts", alias="DOUBAO_TTS_SPEAKER")
     voice_max_daily: int = Field(default=50, alias="VOICE_MAX_DAILY")
     voice_enabled: bool = Field(default=True, alias="VOICE_ENABLED")
+    # 公网 URL（用于暴露语音文件给豆包 ASR 下载）
+    public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
 
     class Config:
         env_file = ".env"

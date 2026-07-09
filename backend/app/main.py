@@ -6,6 +6,7 @@ import asyncio
 import csv
 import io
 import json
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -16,7 +17,8 @@ TZ = ZoneInfo("Asia/Shanghai")
 
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, FileResponse
+from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -489,6 +491,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============================================================
+# 语音文件静态路由（供豆包 ASR 下载 Telegram 语音）
+# ============================================================
+VOICE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "voice")
+os.makedirs(VOICE_DIR, exist_ok=True)
+
+# 挂载到 /voice 路径，豆包 ASR 可通过 https://xxx.up.railway.app/voice/filename.ogg 访问
+app.mount("/voice", StaticFiles(directory=VOICE_DIR), name="voice_files")
 
 
 # ============================================================

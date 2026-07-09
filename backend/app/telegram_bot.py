@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -56,7 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理语音消息：下载 → ASR 转文字 → LLM 回复 → TTS 合成语音 → 发送"""
+    """处理语音消息：下载 → 保存本地 → 暴露 URL → ASR → LLM → TTS → 发送"""
     from app.voice_service import voice_service, EMOTION_PROMPTS
     import traceback as _traceback
 
@@ -85,37 +86,60 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         print(f"🎤 [VOICE] 收到语音: user={user_id} size={len(audio_data)}bytes")
 
-        # 2. ASR 转文字
-        text = await voice_service.transcribe(audio_data, audio_format="ogg")
+        # 2. 保存到本地文件并构造公网 URL
+        # Railway 的 /voice/ 静态路由指向 /app/data/voice/
+        voice_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "voice")
+        os.makedirs(voice_dir, exist_ok=True)
+        filename = f"{uuid.uuid4()}.ogg"
+        filepath = os.path.join(voice_dir, filename)
+        with open(filepath, "wb") as f:
+            f.write(audio_data)
+
+        # 构造公网 URL（豆包 ASR 需要可访问的 URL）
+        base_url = settings.public_base_url
+        if not base_url:
+            # 尝试从 Railway 环境变量获取
+            base_url = os.environ.get("RAILWAY_PUBLIC_URL", "")
+        if not base_url:
+            print("🎤 [VOICE] ❌ 未配置 PUBLIC_BASE_URL，无法暴露音频文件")
+            await update.message.reply_text("语音服务配置不完整，管理员需要配置 PUBLIC_BASE_URL~ 🥺")
+            return
+
+        audio_url = f"{base_url.rstrip('/')}/voice/{filename}"
+        print(f"🎤 [VOICE] 音频 URL: {audio_url}")
+
+        # 3. ASR 转文字（异步：提交 + 轮询）
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        text = await voice_service.transcribe(audio_url, audio_format="ogg")
         print(f"🎤 [VOICE] ASR 结果: '{text[:100] if text else '(空)'}'")
+
+        # 清理临时文件
+        try:
+            os.remove(filepath)
+        except:
+            pass
+
         if not text or len(text.strip()) < 1:
-            # 打印 ASR 配置状态帮助排查
-            has_asr_key = bool(os.environ.get("DOUBAO_ASR_APP_KEY"))
-            has_asr_ak = bool(os.environ.get("DOUBAO_ASR_ACCESS_KEY"))
-            print(f"🎤 [VOICE] ASR 未识别到文字！ASR_KEY={'有' if has_asr_key else '❌无'} ASR_AK={'有' if has_asr_ak else '❌无'}")
+            has_key = bool(os.environ.get("DOUBAO_ASR_API_KEY"))
+            print(f"🎤 [VOICE] ASR 未识别到文字！API_KEY={'有' if has_key else '❌无'}")
             await update.message.reply_text("嗯？刚才没听清呢，再说一次好不好~ 🥺")
             return
 
-        logger.info(f"ASR 识别结果: {text[:80]}")
-
-        # 3. 记录到对话流（带标记）
+        # 4. 记录到对话流
         memory_store.add_conversation(user_id, "user", f"[语音] {text}")
         log("chat", user_id, "telegram", f"[语音] {text[:100]}")
 
-        # 4. 复用核心聊天逻辑生成回复
+        # 5. LLM 生成回复
         reply = await _process_message_text(text, user_id, update, context)
 
         if not reply:
             await update.message.reply_text("嗯... 刚才想说什么来着~ 🥺")
             return
 
-        # 5. 发送"正在说话"状态
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-
         # 6. TTS 合成语音
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
         try:
             audio_reply = await voice_service.synthesize(reply, emotion="sweet")
-            # 发送语音回复
             import io
             await context.bot.send_voice(
                 chat_id=chat_id,
@@ -123,13 +147,14 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 caption="🎙️ 语音版来啦~"
             )
         except Exception as tts_e:
+            print(f"🎤 [VOICE] TTS 失败: {tts_e}")
             logger.error(f"TTS 合成失败: {tts_e}\n{_traceback.format_exc()}")
             # 降级为文字回复
             await _send_smart_reply(update, reply)
             _record_voice_usage(user_id)
             return
 
-        # 7. 同时发送文字版（可选，方便用户阅读）
+        # 7. 同时发送文字版
         await update.message.reply_text("📝 文字版：")
         await _send_smart_reply(update, reply)
 

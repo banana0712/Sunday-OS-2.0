@@ -1,225 +1,175 @@
 """
-SundayOS 语音服务 v1 — 豆包 ASR + TTS
-- ASR：豆包流式语音识别 2.0（WebSocket）
-- TTS：豆包声音合成 2.0 / 声音克隆（HTTP POST）
-- 支持自然语言情感控制（context_texts）
+SundayOS 语音服务 v2 — 豆包异步 ASR + TTS（新版控制台鉴权）
+- ASR：异步 HTTP（submit + 轮询 query），适合长音频
+- TTS：HTTP 流式合成（unidirectional）
+- 鉴权：新版控制台统一用 X-Api-Key（UUID 格式）
 """
 import os
 import json
 import base64
 import asyncio
-import gzip
-import struct
 import uuid
 import logging
 import httpx
-import websockets
 
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 豆包 API 常量
+# 豆包 API 常量（异步 ASR + 流式 TTS）
 # ============================================================
-DOUBAO_ASR_WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+DOUBAO_ASR_SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
+DOUBAO_ASR_QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
 DOUBAO_TTS_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 
-# 消息类型标志（自定义二进制协议）
-MSG_FULL_REQUEST = 0b0001   # 首包：JSON 参数
-MSG_AUDIO_ONLY = 0b0010     # 后续包：纯音频数据
-MSG_FULL_RESPONSE = 0b1001  # 服务端返回结果
-MSG_ERROR = 0b1111          # 错误
-
-# 序列化/压缩标志
-SERIALIZATION_JSON = 0b0001
-COMPRESSION_GZIP = 0b0001
-COMPRESSION_NONE = 0b0000
+# ASR 轮询间隔（秒）
+ASR_POLL_INTERVAL = 2
+# ASR 最大等待时间（秒）
+ASR_MAX_WAIT = 60
 
 
 class VoiceService:
-    """Sunday 语音服务：ASR（语音识别）+ TTS（语音合成）"""
+    """Sunday 语音服务 v2：异步 ASR + 流式 TTS"""
 
     def __init__(self):
-        self.asr_app_key = os.environ.get("DOUBAO_ASR_APP_KEY", "")
-        self.asr_access_key = os.environ.get("DOUBAO_ASR_ACCESS_KEY", "")
+        # ASR 配置
+        self.asr_api_key = os.environ.get("DOUBAO_ASR_API_KEY", "")
         self.asr_resource_id = os.environ.get(
-            "DOUBAO_ASR_RESOURCE_ID", "volc.seedasr.sauc.duration"
+            "DOUBAO_ASR_RESOURCE_ID", "volc.seedasr.auc"
         )
-        self.tts_app_id = os.environ.get("DOUBAO_TTS_APP_ID", "")
-        self.tts_access_key = os.environ.get("DOUBAO_TTS_ACCESS_KEY", "")
-        self.tts_speaker = os.environ.get("DOUBAO_TTS_SPEAKER", "zh_female_vv_uranus_bigtts")
-        self.tts_resource_id = self._get_tts_resource_id()
+        # TTS 配置
+        self.tts_api_key = os.environ.get("DOUBAO_TTS_API_KEY", "")
+        self.tts_resource_id = os.environ.get(
+            "DOUBAO_TTS_RESOURCE_ID", "seed-tts-2.0"
+        )
+        self.tts_speaker = os.environ.get(
+            "DOUBAO_TTS_SPEAKER", "zh_female_vv_uranus_bigtts"
+        )
 
     def is_available(self) -> bool:
         """检查语音服务是否可用"""
-        return bool(self.asr_app_key and self.tts_app_id and self.tts_speaker)
+        return bool(self.asr_api_key and self.tts_api_key)
 
-    def _get_tts_resource_id(self) -> str:
-        """根据 Speaker ID 判断 TTS 模型"""
-        if self.tts_speaker.startswith("S_"):
-            return "seed-icl-2.0"       # 声音克隆
-        elif "_uranus_" in self.tts_speaker or self.tts_speaker.startswith("saturn_"):
-            return "seed-tts-2.0"       # 官方 2.0 预设
-        else:
-            return "seed-tts-1.0"       # 官方 1.0
+    # ========== ASR（异步 HTTP）==========
 
-    # ========== ASR ==========
-
-    async def transcribe(self, audio_data: bytes, audio_format: str = "ogg") -> str:
+    async def transcribe(self, audio_url: str, audio_format: str = "ogg") -> str:
         """
-        语音转文字（流式识别）。30s 超时兜底，避免 WebSocket 挂死导致无响应。
+        语音转文字（异步模式）。
+        提交音频 URL → 轮询查询 → 返回识别文字。
 
         Args:
-            audio_data: 原始音频数据（ogg/mp3/wav/pcm）
-            audio_format: 音频格式（pcm 时直接发送，其他格式先转码）
+            audio_url: 音频文件公网可访问 URL
+            audio_format: 音频格式（ogg/mp3/wav）
 
         Returns:
             识别的文字（可能为空字符串）
         """
-        try:
-            return await asyncio.wait_for(
-                self._transcribe_inner(audio_data, audio_format),
-                timeout=30.0
-            )
-        except asyncio.TimeoutError:
-            logger.error("ASR 转写超时（30s）")
-            return ""
-        except Exception as e:
-            logger.error(f"ASR WebSocket 错误: {e}")
+        if not self.asr_api_key:
+            print("🎤 [ASR] ❌ API Key 未配置")
             return ""
 
-    async def _transcribe_inner(self, audio_data: bytes, audio_format: str) -> str:
-        # 非 PCM 格式先转码
-        if audio_format != "pcm":
-            print(f"🎤 [ASR] 开始转码: {audio_format} → pcm ({len(audio_data)} bytes)")
-            audio_data = await self._convert_to_pcm(audio_data, audio_format)
-            print(f"🎤 [ASR] 转码完成: pcm {len(audio_data)} bytes")
-
-        print(f"🎤 [ASR] 连接 WebSocket... asr_key={'有' if self.asr_app_key else '❌无'}")
         request_id = str(uuid.uuid4())
-        headers = {
-            "X-Api-App-Key": self.asr_app_key,
-            "X-Api-Resource-Id": self.asr_resource_id,
-            "X-Api-Request-Id": request_id,
-            "X-Api-Sequence": "-1",
-        }
-        # 新版控制台只需 X-Api-App-Key；旧版还需要 X-Api-Access-Key
-        if self.asr_access_key:
-            headers["X-Api-Access-Key"] = self.asr_access_key
-            print(f"🎤 [ASR] 使用旧版鉴权（含 Access Key）")
-        else:
-            print(f"🎤 [ASR] 使用新版鉴权（仅 App Key）")
+        print(f"🎤 [ASR] 提交任务: request_id={request_id} format={audio_format}")
 
-        results = []
-        async with websockets.connect(
-            DOUBAO_ASR_WS_URL,
-            additional_headers=headers,
-            open_timeout=10,
-            close_timeout=3,
-        ) as ws:
-            # 发送首包（Full Client Request）
-            first_request = json.dumps({
+        try:
+            # 1. 提交任务
+            submit_payload = {
                 "user": {"uid": "sundayos"},
                 "audio": {
-                    "format": "pcm",
-                    "rate": 16000,
-                    "bits": 16,
-                    "channel": 1,
-                    "language": "zh-CN",
+                    "url": audio_url,
+                    "format": audio_format,
+                    "codec": "raw" if audio_format in ("wav", "pcm") else audio_format,
                 },
                 "request": {
                     "model_name": "bigmodel",
                     "enable_itn": True,
                     "enable_punc": True,
-                }
-            })
-            await self._send_frame(ws, MSG_FULL_REQUEST, first_request.encode())
+                },
+            }
 
-            # 分片发送音频（每 200ms 一包 ≈ 6400 bytes）
-            chunk_size = 6400
-            for i in range(0, len(audio_data), chunk_size):
-                chunk = audio_data[i:i + chunk_size]
-                await self._send_frame(ws, MSG_AUDIO_ONLY, chunk)
-                # 非阻塞尝试接收中间结果
+            submit_headers = {
+                "Content-Type": "application/json",
+                "X-Api-Key": self.asr_api_key,
+                "X-Api-Resource-Id": self.asr_resource_id,
+                "X-Api-Request-Id": request_id,
+                "X-Api-Sequence": "-1",
+            }
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    DOUBAO_ASR_SUBMIT_URL,
+                    headers=submit_headers,
+                    json=submit_payload,
+                )
+
+            status_code = resp.headers.get("X-Api-Status-Code", "")
+            if status_code != "20000000":
+                message = resp.headers.get("X-Api-Message", "unknown")
+                print(f"🎤 [ASR] ❌ 提交失败: code={status_code} msg={message}")
+                # 尝试从 body 获取更多错误信息
                 try:
-                    result = await asyncio.wait_for(ws.recv(), timeout=0.05)
-                    text = self._parse_response(result)
-                    if text:
-                        results.append(text)
-                except asyncio.TimeoutError:
+                    err = resp.json()
+                    print(f"🎤 [ASR] 错误详情: {json.dumps(err, ensure_ascii=False)[:300]}")
+                except:
                     pass
+                return ""
 
-            # 等待最终结果
-            try:
-                while True:
-                    result = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                    text = self._parse_response(result)
-                    if text:
-                        results.append(text)
-                        print(f"🎤 [ASR] 中间结果: {text[:60]}")
-            except asyncio.TimeoutError:
-                pass
+            print(f"🎤 [ASR] ✅ 任务已提交，开始轮询...")
 
-        final = results[-1] if results else ""
-        print(f"🎤 [ASR] 最终结果: '{final[:100] if final else '(空)'}' results_count={len(results)}")
-        return final
+            # 2. 轮询查询结果
+            query_headers = {
+                "Content-Type": "application/json",
+                "X-Api-Key": self.asr_api_key,
+                "X-Api-Resource-Id": self.asr_resource_id,
+                "X-Api-Request-Id": request_id,
+            }
 
-    def _parse_response(self, raw_data: bytes) -> str:
-        """解析 ASR 返回的二进制帧"""
-        try:
-            header = struct.unpack(">I", raw_data[:4])[0]
-            payload_size = struct.unpack(">I", raw_data[4:8])[0]
-            payload = raw_data[8:8 + payload_size]
+            elapsed = 0
+            while elapsed < ASR_MAX_WAIT:
+                await asyncio.sleep(ASR_POLL_INTERVAL)
+                elapsed += ASR_POLL_INTERVAL
 
-            compression = (header >> 4) & 0x0F
-            if compression == COMPRESSION_GZIP:
-                payload = gzip.decompress(payload)
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(
+                        DOUBAO_ASR_QUERY_URL,
+                        headers=query_headers,
+                        json={},
+                    )
 
-            msg_type = header & 0x0F
-            if msg_type == MSG_FULL_RESPONSE:
-                result = json.loads(payload.decode())
-                return result.get("result", {}).get("text", "")
-            elif msg_type == MSG_ERROR:
-                error = json.loads(payload.decode())
-                logger.warning(f"ASR error: {error}")
+                code = resp.headers.get("X-Api-Status-Code", "")
+
+                if code == "20000000":
+                    # 任务完成，获取结果
+                    try:
+                        result = resp.json()
+                        text = result.get("result", {}).get("text", "")
+                        print(f"🎤 [ASR] ✅ 识别完成（{elapsed}s）: '{text[:80]}'")
+                        return text
+                    except json.JSONDecodeError:
+                        print(f"🎤 [ASR] ❌ 无法解析结果 JSON")
+                        return ""
+                elif code in ("20000001", "20000002"):
+                    # 处理中 / 排队中
+                    print(f"🎤 [ASR] ⏳ 处理中... ({elapsed}s)")
+                    continue
+                else:
+                    message = resp.headers.get("X-Api-Message", "")
+                    print(f"🎤 [ASR] ❌ 查询失败: code={code} msg={message}")
+                    return ""
+
+            print(f"🎤 [ASR] ⏰ 轮询超时（{ASR_MAX_WAIT}s）")
+            return ""
+
         except Exception as e:
-            logger.warning(f"解析 ASR 响应失败: {e}")
-        return ""
+            print(f"🎤 [ASR] ❌ 异常: {type(e).__name__}: {e}")
+            logger.error(f"ASR 异常: {e}")
+            return ""
 
-    async def _send_frame(self, ws, msg_type: int, payload: bytes):
-        """发送 WebSocket 二进制帧"""
-        compressed = gzip.compress(payload) if len(payload) > 100 else payload
-        compression = COMPRESSION_GZIP if len(payload) > 100 else COMPRESSION_NONE
-
-        serialization = SERIALIZATION_JSON if msg_type == MSG_FULL_REQUEST else 0
-        header = (0x10 << 24) | (serialization << 8) | (compression << 4) | msg_type
-        header_bytes = struct.pack(">I", header)
-        size_bytes = struct.pack(">I", len(compressed))
-
-        await ws.send(header_bytes + size_bytes + compressed)
-
-    async def _convert_to_pcm(self, audio_data: bytes, fmt: str) -> bytes:
-        """用 ffmpeg 转码为 16kHz mono PCM"""
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-i", "pipe:0",
-            "-ar", "16000", "-ac", "1", "-f", "s16le",
-            "-acodec", "pcm_s16le", "pipe:1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate(input=audio_data)
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg 转码失败: {stderr.decode()[:200]}")
-        return stdout
-
-    # ========== TTS ==========
+    # ========== TTS（流式 HTTP）==========
 
     async def synthesize(self, text: str, emotion: str = "default") -> bytes:
         """
         文字转语音，返回 MP3 音频数据。
-
-        长文本会自动按句分段合成后拼接，避免触发豆包
-        「input length too long (400)」的单次字数上限。
+        长文本自动分段合成后拼接。
 
         Args:
             text: 要合成的文字
@@ -231,11 +181,9 @@ class VoiceService:
         context_text = EMOTION_PROMPTS.get(emotion, "")
         chunks = self.split_for_tts(text, max_chars=200)
 
-        # 只有一段：直接合成，省去拼接
         if len(chunks) == 1:
             return await self._synthesize_chunk(chunks[0], context_text)
 
-        # 多段：逐段合成再拼接
         audio_parts = []
         for chunk in chunks:
             audio = await self._synthesize_chunk(chunk, context_text)
@@ -247,8 +195,6 @@ class VoiceService:
         additions = {}
         if context_text:
             additions["context_texts"] = [context_text]
-        if self.tts_speaker.startswith("S_"):
-            additions["model_type"] = 4  # 克隆模型需要
 
         payload = {
             "user": {"uid": "sundayos"},
@@ -265,15 +211,14 @@ class VoiceService:
 
         headers = {
             "Content-Type": "application/json",
-            "X-Api-App-Id": self.tts_app_id,
-            "X-Api-Access-Key": self.tts_access_key,
+            "X-Api-Key": self.tts_api_key,
             "X-Api-Resource-Id": self.tts_resource_id,
         }
 
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(DOUBAO_TTS_URL, headers=headers, json=payload)
-            response.raise_for_status()
-            body = response.text
+            resp = await client.post(DOUBAO_TTS_URL, headers=headers, json=payload)
+            resp.raise_for_status()
+            body = resp.text
 
         audio_chunks = []
         for line in body.split("\n"):
@@ -291,35 +236,20 @@ class VoiceService:
             elif code == 20000000:
                 break  # 流结束
             elif code is not None and code != 0:
-                raise RuntimeError(f"TTS error: code={code}")
+                raise RuntimeError(
+                    f"TTS error: code={code} msg={parsed.get('message', '')}"
+                )
 
         if not audio_chunks:
             raise RuntimeError("TTS returned no audio data")
 
         return b"".join(audio_chunks)
 
-    async def synthesize_with_emotions(self, segments: list[tuple[str, str]]) -> bytes:
-        """
-        逐句合成，每句可有不同情感。
-
-        Args:
-            segments: [(text, emotion), ...]
-
-        Returns:
-            拼接后的 MP3 音频
-        """
-        audio_parts = []
-        for seg_text, emotion in segments:
-            context_text = EMOTION_PROMPTS.get(emotion, "")
-            audio = await self._synthesize_chunk(seg_text, context_text)
-            audio_parts.append(audio)
-        return b"".join(audio_parts)
-
     @staticmethod
     def split_for_tts(text: str, max_chars: int = 300) -> list[str]:
         """
         按句号/感叹号/问号分段，保证每段不超过 max_chars。
-        若单句本身超过 max_chars，再做硬切兜底，彻底避免超长报错。
+        若单句本身超过 max_chars，再做硬切兜底。
         """
         import re
         sentences = re.split(r'(?<=[。！？\n])\s*', text)
@@ -329,7 +259,6 @@ class VoiceService:
             s = s.strip()
             if not s:
                 continue
-            # 单句本身超长：先硬切成不超过 max_chars 的小段
             if len(s) > max_chars:
                 if current:
                     chunks.append(current)
