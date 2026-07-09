@@ -2,7 +2,7 @@
 SundayOS 语音服务 v2 — 豆包异步 ASR + TTS + MiniMax 音乐生成
 - ASR：异步 HTTP（submit + 轮询 query）
 - TTS：HTTP 流式合成（unidirectional）
-- 唱歌：MiniMax Music API（music-2.6-free）
+- 唱歌：MiniMax Music API（music-2.6-free 原创 + music-cover-free 翻唱）
 """
 import os
 import json
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 # MiniMax Music API
 MINIMAX_MUSIC_URL = "https://api.minimaxi.com/v1/music_generation"
+MINIMAX_COVER_PREPROCESS_URL = "https://api.minimaxi.com/v1/music_cover_preprocess"
 
 # ============================================================
 # 豆包 API 常量（异步 ASR + 流式 TTS）
@@ -326,6 +327,122 @@ class VoiceService:
 
         duration = data.get("extra_info", {}).get("music_duration", 0)
         print(f"🎵 [MUSIC] ✅ 生成成功！时长={duration}ms")
+
+        return bytes.fromhex(audio_hex)
+
+    # ========== MiniMax Cover（翻唱：保留原曲旋律）==========
+
+    async def preprocess_cover(self, audio_url: str) -> dict:
+        """
+        第一步：预处理原曲，提取音频特征和结构化歌词（免费）。
+
+        Args:
+            audio_url: 原曲的公开可访问 URL
+
+        Returns:
+            {"cover_feature_id": "...", "formatted_lyrics": "...", "audio_duration": 123}
+        """
+        if not self.minimax_api_key:
+            raise RuntimeError("MiniMax API Key 未配置")
+
+        payload = {
+            "model": "music-cover-free",
+            "audio_url": audio_url,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.minimax_api_key}",
+        }
+
+        print(f"🎵 [COVER-PRE] 预处理原曲: {audio_url[:80]}...")
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(MINIMAX_COVER_PREPROCESS_URL, headers=headers, json=payload)
+            data = resp.json()
+
+        status = data.get("base_resp", {}).get("status_code")
+        msg = data.get("base_resp", {}).get("status_msg", "")
+
+        if status != 0:
+            raise RuntimeError(f"Cover 预处理失败: code={status} msg={msg}")
+
+        feature_id = data.get("cover_feature_id", "")
+        lyrics = data.get("formatted_lyrics", "")
+        duration = data.get("audio_duration", 0)
+
+        if not feature_id:
+            raise RuntimeError("Cover 预处理未返回 feature_id")
+
+        print(f"🎵 [COVER-PRE] ✅ feature_id={feature_id[:20]}... duration={duration}s lyrics_len={len(lyrics)}")
+
+        return {
+            "cover_feature_id": feature_id,
+            "formatted_lyrics": lyrics,
+            "audio_duration": duration,
+        }
+
+    async def generate_cover(
+        self,
+        cover_feature_id: str,
+        lyrics: str = "",
+        prompt: str = "甜美可爱的女声，J-Pop动漫主题曲风格，温柔甜美",
+    ) -> bytes:
+        """
+        第二步：用预处理特征 + 歌词 + 风格生成翻唱（保留原曲旋律）。
+
+        Args:
+            cover_feature_id: 预处理返回的特征 ID
+            lyrics: 要唱的歌词（可选，不传则自动从原曲提取）
+            prompt: 翻唱风格描述
+
+        Returns:
+            MP3 音频 bytes
+        """
+        if not self.minimax_api_key:
+            raise RuntimeError("MiniMax API Key 未配置")
+
+        payload = {
+            "model": "music-cover-free",
+            "cover_feature_id": cover_feature_id,
+            "prompt": prompt,
+            "audio_setting": {
+                "sample_rate": 44100,
+                "bitrate": 256000,
+                "format": "mp3",
+            },
+        }
+
+        # 如果传了歌词，加入 payload
+        if lyrics:
+            import re
+            lyrics = re.sub(r'[（(].*?[）)]', '', lyrics)
+            lyrics = lyrics.strip()
+            payload["lyrics"] = lyrics
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.minimax_api_key}",
+        }
+
+        print(f"🎵 [COVER] 生成翻唱: feature_id={cover_feature_id[:20]}... lyrics_len={len(lyrics)}")
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(MINIMAX_MUSIC_URL, headers=headers, json=payload)
+            data = resp.json()
+
+        status = data.get("base_resp", {}).get("status_code")
+        msg = data.get("base_resp", {}).get("status_msg", "")
+
+        if status != 0:
+            raise RuntimeError(f"Cover 生成失败: code={status} msg={msg}")
+
+        audio_hex = data.get("data", {}).get("audio", "")
+        if not audio_hex:
+            raise RuntimeError("Cover 未返回音频数据")
+
+        duration = data.get("extra_info", {}).get("music_duration", 0)
+        print(f"🎵 [COVER] ✅ 翻唱成功！时长={duration}ms")
 
         return bytes.fromhex(audio_hex)
 
