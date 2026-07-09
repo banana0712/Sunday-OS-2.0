@@ -205,10 +205,16 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 instruments_info = song_info.get("instruments", "")
         except Exception as e:
             print(f"🎵 [MUSIC] AI 判断失败: {e}")
-            # 降级：用关键词兜底
+            # 降级：用关键词兜底（更精确的关键词）
             import re as _re
-            sing_keywords = ["唱", "歌", "音乐", "旋律", "来一首"]
-            should_sing = any(kw in text for kw in sing_keywords)
+            # 只匹配明确的唱歌请求，避免「推送邮件」被误匹配
+            sing_patterns = [
+                r'唱(?:一首|个|首|支|段)?(?:歌|曲|吧|嘛|呗)',
+                r'来一?首(?:歌|曲)',
+                r'(?:想听|点一?首|会唱)(?:歌|曲|小幸运|稻香|晴天|周杰伦)',
+                r'唱歌(?:吗|吧|嘛|呗|给我听)',
+            ]
+            should_sing = any(_re.search(p, text) for p in sing_patterns)
             if should_sing:
                 # 正则提取歌曲名
                 song_match = _re.search(r'(?:唱|想听|来一?首|点一?首)(.{1,15}?)(?:吧|呗|嘛|$)', text)
@@ -254,6 +260,13 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text("唔... 唱歌引擎出了点小问题，下次再唱给你听~ 🥺")
                 return
 
+        # 5.5 检测邮件推送请求
+        email_push_keywords = ["推送邮件", "发邮件", "给我发邮件", "邮件推送", "send email", "push email"]
+        if any(kw in text for kw in email_push_keywords):
+            print(f"📧 [PUSH] 用户请求邮件推送: {text[:50]}")
+            await _handle_email_push(update, context, chat_id, text, user_id)
+            return
+
         # 6. 正常流程：LLM 生成回复
         reply = await _process_message_text(text, user_id, update, context)
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
@@ -294,6 +307,50 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("唔... 语音处理出了点小问题，打字跟我说好不好？🥺")
         except Exception:
             pass  # 如果连 reply_text 都发不了就算了
+
+
+async def _handle_email_push(update, context, chat_id, text, user_id):
+    """处理用户请求推送邮件"""
+    import httpx
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    await update.message.reply_text("正在准备邮件... 📧")
+
+    # 判断用户想要什么类型的邮件
+    template_type = "morning"  # 默认早安
+    if any(kw in text for kw in ["周报", "weekly", "总结"]):
+        template_type = "weekly"
+    elif any(kw in text for kw in ["心情", "fortune", "签"]):
+        template_type = "fortune"
+    elif any(kw in text for kw in ["知识", "knowledge", "科普"]):
+        template_type = "knowledge"
+    elif any(kw in text for kw in ["创意", "creative", "短文"]):
+        template_type = "creative"
+
+    # 调用内部 API 发送邮件
+    try:
+        base_url = settings.public_base_url or os.environ.get("RAILWAY_PUBLIC_URL", "")
+        if not base_url:
+            await update.message.reply_text("邮件服务配置不完整 😢")
+            return
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{base_url.rstrip('/')}/api/push/send",
+                headers={"Authorization": f"Bearer {settings.api_key}"},
+                json={
+                    "user_id": user_id,
+                    "template_type": template_type,
+                },
+            )
+            data = resp.json()
+            if data.get("sent"):
+                await update.message.reply_text(f"邮件已发送！📧 请查收你的邮箱~")
+            else:
+                await update.message.reply_text("邮件发送出了点问题 😢 稍后再试试？")
+    except Exception as e:
+        print(f"📧 [PUSH] 发送失败: {e}")
+        await update.message.reply_text("邮件服务暂时不可用 😢")
 
 
 def _check_voice_quota(user_id: str) -> bool:
