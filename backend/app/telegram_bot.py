@@ -12,7 +12,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram.constants import ChatAction
 
 from app.config import settings
-from app.memory import memory_store
+from app.memory import memory_store, get_db
 from app.mailer import send_email
 from app.logger import log
 
