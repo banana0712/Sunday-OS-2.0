@@ -147,124 +147,130 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # 获取最近的对话上下文
         recent_messages = memory_store.get_conversation_context(user_id, max_turns=3) or ""
 
-        song_decision_prompt = f"""你是 Sunday，一个会唱歌的 AI 女孩。请一步完成以下所有任务。
+        # ===== AI 意图判断：一次性决定唱歌/邮件推送/普通聊天 =====
+        intent_prompt = f"""你是 Sunday。请判断用户的意图。
 
 用户说：「{text}」
 
 最近对话：
 {recent_messages[:500]}
 
-## 任务1：判断是否唱歌
-- 明确要求唱歌 → should_sing=true
-- 普通聊天 → should_sing=false
+请判断用户的意图，回复一个 JSON：
+{{
+  "action": "sing/push_email/chat 三选一",
+  "reason": "一句话判断理由"
+}}
 
-## 任务2：提取歌曲名和唱法
-- 去掉量词（"一首""一个"）和语气词（"吧""呗""嘛"）
-- sing_mode: "chorus_only"(快唱/高潮) / "verse_chorus"(默认) / "full_structure"(完整/全首) / "cover_mode"(翻唱/原曲)
+判断规则：
+- 明确要求唱歌/唱某首歌/来一首 → "sing"
+- 要求推送邮件/发邮件/发周报/发日报/发早安 → "push_email"
+- 普通聊天/提问/闲聊 → "chat"
 
-## 任务3：回忆歌词（如果should_sing=true）
-- 用 [verse] [chorus] [bridge] 等标签标记段落
-- 尽可能完整回忆
+## 如果 action="sing"，额外输出：
+{{
+  "action": "sing",
+  "song_name": "歌曲名",
+  "sing_mode": "verse_chorus/chorus_only/full_structure/cover_mode",
+  "lyrics": "[verse]\\n歌词...\\n\\n[chorus]\\n歌词...",
+  "style": "抒情民谣",
+  "bpm": "76 BPM",
+  "mood": "温暖治愈",
+  "instruments": "钢琴加弦乐"
+}}
 
-## 任务4：提取音乐信息（如果should_sing=true）
-- 风格、BPM、情绪、乐器
+## 如果 action="push_email"，额外输出：
+{{
+  "action": "push_email",
+  "template": "morning/weekly/fortune/knowledge/creative 选一个",
+  "topic": "用户想要的主题描述（如晨间随笔、周报总结）"
+}}
 
-请只回复一个 JSON（所有字段在一层）：
-{{"should_sing": true/false, "song_name": "歌曲名或空", "sing_mode": "verse_chorus", "lyrics": "[verse]\\n歌词...\\n\\n[chorus]\\n歌词...", "style": "抒情民谣", "bpm": "76 BPM", "mood": "温暖治愈", "instruments": "钢琴加弦乐"}}"""
+只回复 JSON，不要其他文字。"""
 
+        action = "chat"
+        # 唱歌相关
         should_sing = False
         song_style = "甜美可爱的女声，轻快J-Pop，动漫主题曲风格"
         specified_song = ""
         sing_mode = "verse_chorus"
-        # 直接从这里获取全部信息
         full_lyrics = ""
         style_info = ""
         bpm_info = ""
         mood_info = ""
         instruments_info = ""
+        # 邮件相关
+        push_template = "morning"
+        push_topic = ""
 
         try:
-            decision_resp = await llm_service.client.chat.completions.create(
+            intent_resp = await llm_service.client.chat.completions.create(
                 model=llm_service.model_fast,
-                messages=[{"role": "user", "content": song_decision_prompt}],
+                messages=[{"role": "user", "content": intent_prompt}],
                 max_tokens=800,
-                temperature=0.5,
+                temperature=0.3,
             )
-            decision_text = decision_resp.choices[0].message.content or ""
-            print(f"🎵 [MUSIC] AI 一步判断结果: {decision_text[:300]}")
+            intent_text = intent_resp.choices[0].message.content or ""
+            print(f"🤖 [INTENT] AI 意图判断: {intent_text[:300]}")
 
-            song_info = _extract_json(decision_text)
-            if song_info:
-                should_sing = song_info.get("should_sing", False)
-                specified_song = song_info.get("song_name", "")
-                sing_mode = song_info.get("sing_mode", "verse_chorus")
-                full_lyrics = song_info.get("lyrics", "")
-                style_info = song_info.get("style", "")
-                bpm_info = song_info.get("bpm", "")
-                mood_info = song_info.get("mood", "")
-                instruments_info = song_info.get("instruments", "")
+            intent_info = _extract_json(intent_text)
+            if intent_info:
+                action = intent_info.get("action", "chat")
+                print(f"🤖 [INTENT] action={action} reason={intent_info.get('reason', '')}")
+
+                if action == "sing":
+                    should_sing = True
+                    specified_song = intent_info.get("song_name", "")
+                    sing_mode = intent_info.get("sing_mode", "verse_chorus")
+                    full_lyrics = intent_info.get("lyrics", "")
+                    style_info = intent_info.get("style", "")
+                    bpm_info = intent_info.get("bpm", "")
+                    mood_info = intent_info.get("mood", "")
+                    instruments_info = intent_info.get("instruments", "")
+                elif action == "push_email":
+                    push_template = intent_info.get("template", "morning")
+                    push_topic = intent_info.get("topic", "")
         except Exception as e:
-            print(f"🎵 [MUSIC] AI 判断失败: {e}")
-            # 降级：用关键词兜底（更精确的关键词）
+            print(f"🤖 [INTENT] AI 判断失败: {e}")
+            # 降级：简单的关键词兜底
             import re as _re
-            # 只匹配明确的唱歌请求，避免「推送邮件」被误匹配
-            sing_patterns = [
-                r'唱(?:一首|个|首|支|段)?(?:歌|曲|吧|嘛|呗)',
-                r'来一?首(?:歌|曲)',
-                r'(?:想听|点一?首|会唱)(?:歌|曲|小幸运|稻香|晴天|周杰伦)',
-                r'唱歌(?:吗|吧|嘛|呗|给我听)',
-            ]
-            should_sing = any(_re.search(p, text) for p in sing_patterns)
-            if should_sing:
-                # 正则提取歌曲名
-                song_match = _re.search(r'(?:唱|想听|来一?首|点一?首)(.{1,15}?)(?:吧|呗|嘛|$)', text)
-                if song_match:
-                    specified_song = song_match.group(1).strip()
+            if _re.search(r'唱(?:歌|一|首|个)|来一?首|想听.*歌', text):
+                action = "sing"
+            elif _re.search(r'推送|发邮件|邮件|周报|日报|早报', text):
+                action = "push_email"
 
-        if should_sing:
+        # ===== 根据 AI 意图分流 =====
+        if action == "sing":
             print(f"🎵 [SING] 用户指定歌曲: {specified_song}, 唱法: {sing_mode}")
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
             try:
-                # 清洗歌曲名
                 import re as _re
                 specified_song = _re.sub(r'^[一首一个首个]+', '', specified_song).strip()
                 specified_song = _re.sub(r'[。！？.!?]+$', '', specified_song).strip()
 
                 if specified_song and len(specified_song) >= 2:
-                    # ===== 指定歌曲 → 一步到位生成（歌词已在第一步回忆好了）=====
                     print(f"🎵 [SING] 一步生成: {specified_song}, lyrics_len={len(full_lyrics)}")
                     await _handle_sing_one_shot(
-                        update=update,
-                        context=context,
-                        chat_id=chat_id,
-                        song_name=specified_song,
-                        song_style=song_style,
-                        sing_mode=sing_mode,
-                        full_lyrics=full_lyrics,
-                        style_info=style_info,
-                        bpm_info=bpm_info,
-                        mood_info=mood_info,
-                        instruments_info=instruments_info,
+                        update=update, context=context, chat_id=chat_id,
+                        song_name=specified_song, song_style=song_style,
+                        sing_mode=sing_mode, full_lyrics=full_lyrics,
+                        style_info=style_info, bpm_info=bpm_info,
+                        mood_info=mood_info, instruments_info=instruments_info,
                         voice_service=voice_service,
                     )
                 else:
-                    # ===== 即兴创作 ====
                     await _handle_improvise(update, chat_id, song_style, voice_service, llm_service)
 
                 _record_voice_usage(user_id)
-                return  # 唱歌完成，不走下面的普通流程
+                return
             except Exception as music_e:
                 import traceback as _tb
                 print(f"🎵 [MUSIC] 失败: {music_e}\n{_tb.format_exc()}")
-                # 降级：让 LLM 正常回复 + TTS
                 await update.message.reply_text("唔... 唱歌引擎出了点小问题，下次再唱给你听~ 🥺")
                 return
 
-        # 5.5 检测邮件推送请求
-        email_push_keywords = ["推送邮件", "发邮件", "给我发邮件", "邮件推送", "send email", "push email"]
-        if any(kw in text for kw in email_push_keywords):
-            print(f"📧 [PUSH] 用户请求邮件推送: {text[:50]}")
-            await _handle_email_push(update, context, chat_id, text, user_id)
+        if action == "push_email":
+            print(f"📧 [PUSH] AI判断推送邮件: template={push_template} topic={push_topic}")
+            await _handle_email_push(update, context, chat_id, push_template, push_topic)
             return
 
         # 6. 正常流程：LLM 生成回复
@@ -309,25 +315,23 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             pass  # 如果连 reply_text 都发不了就算了
 
 
-async def _handle_email_push(update, context, chat_id, text, user_id):
-    """处理用户请求推送邮件"""
+async def _handle_email_push(update, context, chat_id, template_type="morning", topic=""):
+    """AI 决定的邮件推送（template 和 topic 由 AI 意图判断提供）"""
     import httpx
 
+    template_labels = {
+        "morning": "早安手报 ☀️",
+        "weekly": "周报 📊",
+        "fortune": "心情签 ✨",
+        "knowledge": "知识卡片 📚",
+        "creative": "创意推送 🎨",
+    }
+    label = template_labels.get(template_type, "邮件")
+    topic_suffix = f"（{topic}）" if topic else ""
+
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    await update.message.reply_text("正在准备邮件... 📧")
+    await update.message.reply_text(f"正在准备{label}{topic_suffix}... 📧")
 
-    # 判断用户想要什么类型的邮件
-    template_type = "morning"  # 默认早安
-    if any(kw in text for kw in ["周报", "weekly", "总结"]):
-        template_type = "weekly"
-    elif any(kw in text for kw in ["心情", "fortune", "签"]):
-        template_type = "fortune"
-    elif any(kw in text for kw in ["知识", "knowledge", "科普"]):
-        template_type = "knowledge"
-    elif any(kw in text for kw in ["创意", "creative", "短文"]):
-        template_type = "creative"
-
-    # 调用内部 API 发送邮件
     try:
         base_url = settings.public_base_url or os.environ.get("RAILWAY_PUBLIC_URL", "")
         if not base_url:
@@ -339,13 +343,13 @@ async def _handle_email_push(update, context, chat_id, text, user_id):
                 f"{base_url.rstrip('/')}/api/push/send",
                 headers={"Authorization": f"Bearer {settings.api_key}"},
                 json={
-                    "user_id": user_id,
+                    "user_id": "daily",
                     "template_type": template_type,
                 },
             )
             data = resp.json()
             if data.get("sent"):
-                await update.message.reply_text(f"邮件已发送！📧 请查收你的邮箱~")
+                await update.message.reply_text(f"{label}已发送！请查收邮箱~ 📧")
             else:
                 await update.message.reply_text("邮件发送出了点问题 😢 稍后再试试？")
     except Exception as e:
