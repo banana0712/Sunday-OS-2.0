@@ -102,6 +102,18 @@ def _clean_reply_body(body: str) -> str:
     return body.strip()
 
 
+def _similarity(a: str, b: str) -> float:
+    """简单的文本相似度（基于公共字符比例）"""
+    if not a or not b:
+        return 0.0
+    a_set = set(a)
+    b_set = set(b)
+    if not a_set or not b_set:
+        return 0.0
+    intersection = a_set & b_set
+    return len(intersection) / min(len(a_set), len(b_set))
+
+
 def _is_sunday_email(subject: str) -> bool:
     """判断是否是回复 Sunday 的邮件"""
     return any(kw in subject.lower() for kw in [
@@ -156,10 +168,19 @@ async def _process_email(uid: int, subject: str, body: str, from_addr: str):
         
         memory_store.add_conversation(user_id, "assistant", reply, tokens)
         
-        # 提取记忆
-        from app.main import extract_memories_from_message, _force_extract_info
-        await extract_memories_from_message(llm_service.client, clean_body, user_id)
-        _force_extract_info(clean_body, user_id)
+        # 提取记忆（只做LLM提取，不做正则强制提取）
+        # 增加去重检查：先查是否已有相似记忆
+        from app.main import extract_memories_from_message
+        existing = memory_store.search(user_id, query=clean_body, limit=5)
+        # 如果最近已有相似记忆，跳过提取
+        if existing and any(
+            _similarity(clean_body, m.get("content", "")) > 0.7
+            for m in existing
+        ):
+            logger.info(f"📝 记忆已存在，跳过提取 [UID:{uid}]")
+        else:
+            stored = await extract_memories_from_message(llm_service.client, clean_body, user_id)
+            logger.info(f"📝 提取了 {stored} 条新记忆 [UID:{uid}]")
         
         # 发邮件回复
         subject_reply = f"Re: {subject}" if not subject.startswith("Re:") else subject

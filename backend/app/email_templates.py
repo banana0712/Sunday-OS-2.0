@@ -59,6 +59,22 @@ def _badge(text: str, palette: dict) -> str:
     return f'<span style="display:inline-block;background:{palette["accent_light"]};color:{palette["accent_text"]};padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;margin:2px 3px;">{text}</span>'
 
 
+def _image_spot(spot: dict) -> str:
+    """渲染 AI 决定的配图插入点（使用 Unsplash 占位图风格）"""
+    keyword = spot.get("keyword", "nature")
+    desc = spot.get("description", "")
+    # 使用 Unsplash Source 的占位风格色块（避免实际请求外部图片）
+    colors = ["f0ebe3", "e8f0e3", "e3eaf0", "f0e3e8", "e3f0ed"]
+    import hashlib
+    idx = int(hashlib.md5(keyword.encode()).hexdigest()[:2], 16) % len(colors)
+    bg_color = colors[idx]
+    return f"""<table width="100%" cellpadding="0" cellspacing="0" style="margin:12px 0;border-radius:12px;overflow:hidden;">
+<tr><td style="background:#{bg_color};padding:24px 16px;text-align:center;">
+<div style="font-size:28px;line-height:1.2;">{'🖼️' if not desc else '🎨'}</div>
+<div style="font-size:11px;color:#999;margin-top:8px;">{desc or keyword}</div>
+</td></tr></table>"""
+
+
 def _weather_card(weather: dict, palette: dict) -> str:
     if not weather:
         return ""
@@ -148,7 +164,7 @@ async def ai_design(
     prefs_text = context.get("prefs_text", "")
     type_desc = context.get("type_description", "")
 
-    prompt = f"""你是一个有品味的邮件视觉设计师。请为一封邮件设计配色和风格。
+    prompt = f"""你是一个有品味的邮件视觉设计师。请为一封邮件设计配色、排版和配图方案。
 
 【场景】
 - 时间：{date_str} {weekday_str}
@@ -164,18 +180,26 @@ async def ai_design(
   "vibe": "用2-3个中文词描述氛围（如：温暖治愈、清爽晨光、静谧星空）",
   "palette": {{
     "bg": "#页面背景色",
-    "card_bg": "#卡片底色（通常白色或接近白）",
-    "accent": "#主强调色（按钮/重点）",
-    "accent_light": "#强调色的极浅版（卡片背景）",
+    "card_bg": "#卡片底色",
+    "accent": "#主强调色",
+    "accent_light": "#强调色的极浅版",
     "accent_text": "#强调色对应的深色文字版",
     "title": "#标题颜色",
     "text": "#正文颜色",
     "muted": "#辅助文字/分隔线颜色",
-    "gradient": "CSS渐变（如 linear-gradient(135deg,#xxx,#yyy,#zzz)）",
+    "gradient": "CSS渐变",
     "divider": "#分隔线颜色"
   }},
   "layout": "cards/letter/magazine/minimal 选一个",
-  "divider_char": "3-8个字符的分隔装饰（如 ～ ～ ～ 或 ✿ ❀ ✿）",
+  "typography": {{
+    "header_style": "centered_large/left_aligned/ribbon_banner 选一个",
+    "card_style": "rounded/sharp/floating 选一个",
+    "body_size": "14px/15px/16px 选一个"
+  }},
+  "image_spots": [
+    {{"position": "after_header/before_footer", "description": "配图描述（英文，用于搜索Unsplash）", "keyword": "搜索关键词"}}
+  ],
+  "divider_char": "3-8个字符的分隔装饰",
   "decor_emojis": ["选3-5个氛围匹配的emoji"],
   "special_element": "一句话描述一个独特设计细节"
 }}
@@ -184,7 +208,8 @@ async def ai_design(
 - 配色要有明确的情感倾向，不要永远是粉色
 - 根据天气调整：晴天温暖明亮、雨天柔和宁静、阴天干净清爽
 - 根据时间调整：早晨清新、午间活泼、晚间温柔
-- 颜色值用6位hex（#RRGGBB）
+- image_spots 最多2个配图位置，没有合适的可以留空数组
+- typography 根据邮件类型选择：日报用cards+centered，周报用magazine+left
 - 大胆创新但保持文字可读性
 - 只输出JSON，不要任何解释文字"""
 
@@ -268,7 +293,19 @@ def morning_post(
         sections.append(f'<div style="font-size:15px;color:{palette["text"]};line-height:1.9;text-align:center;padding:8px 0;">{message}</div>')
 
     body = _header("☀️ 早安手报", f"{date_str} {weekday_str}", palette)
+
+    # AI 决定的配图插入点（after_header）
+    for spot in palette.get("image_spots", []):
+        if spot.get("position") == "after_header":
+            body += _image_spot(spot)
+
     body += _apply_layout(sections, palette.get("layout", "cards"), palette)
+
+    # AI 决定的配图插入点（before_footer）
+    for spot in palette.get("image_spots", []):
+        if spot.get("position") == "before_footer":
+            body += _image_spot(spot)
+
     body += _footer(time_str, palette)
     return _render_mail(body, palette)
 

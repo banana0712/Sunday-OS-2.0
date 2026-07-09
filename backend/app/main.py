@@ -159,12 +159,26 @@ def select_model(message: str) -> tuple[str, str]:
 # ============================================================
 # LLM 智能记忆提取
 # ============================================================
+# 频率限制：同一用户记忆提取的最小间隔（秒）
+_MEMORY_EXTRACT_COOLDOWN = {}
+_MEMORY_EXTRACT_MIN_INTERVAL = 600  # 10分钟内不重复提取
+_MEMORY_EXTRACT_MAX_PER_HOUR = 5    # 每小时最多5次
+
+
 async def extract_memories_from_message(
     client: AsyncOpenAI, message: str, user_id: str
 ) -> int:
     """用 LLM 分析消息，智能提取和分类记忆，返回存储条数"""
     if len(message) < 10:
         return 0
+
+    # 频率限制
+    now = time.time()
+    last_extract = _MEMORY_EXTRACT_COOLDOWN.get(user_id, 0)
+    if now - last_extract < _MEMORY_EXTRACT_MIN_INTERVAL:
+        return 0  # 太频繁，跳过
+
+    _MEMORY_EXTRACT_COOLDOWN[user_id] = now
 
     prompt = MEMORY_EXTRACTION_PROMPT.format(message=message)
 
