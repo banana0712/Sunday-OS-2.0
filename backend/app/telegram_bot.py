@@ -457,13 +457,22 @@ async def _handle_song_cover(
 
         print(f"🎵 [COVER] 原曲歌词: {extracted_lyrics[:200]}")
 
+        # 提取高潮部分（副歌）加速翻唱
+        chorus_lyrics = _extract_chorus(extracted_lyrics)
+        if chorus_lyrics:
+            print(f"🎵 [COVER] 提取高潮: {chorus_lyrics[:100]}")
+            final_lyrics = chorus_lyrics
+            await update.message.reply_text("提取了歌曲的高潮部分来翻唱... 🎶")
+        else:
+            final_lyrics = extracted_lyrics
+
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
         await update.message.reply_text("正在用 Sunday 的风格翻唱... 🎤")
 
         cover_prompt = f"甜美可爱的女声，J-Pop动漫主题曲风格，温柔甜美，{song_style}"
         audio_reply = await voice_service.generate_cover(
             cover_feature_id=feature_id,
-            lyrics=extracted_lyrics,
+            lyrics=final_lyrics,
             prompt=cover_prompt,
         )
 
@@ -476,6 +485,39 @@ async def _handle_song_cover(
     except Exception as cover_e:
         print(f"🎵 [COVER] 翻唱流程失败: {cover_e}")
         raise
+
+
+def _extract_chorus(lyrics: str) -> str:
+    """
+    从结构化歌词中提取高潮/副歌部分（[Chorus] 标签内的内容）。
+    如果找不到标签，用 LLM 方式提取最经典的 4-8 句。
+    """
+    import re as _re
+
+    # 策略1: 找 [Chorus] / [chorus] / [副歌] 标签
+    chorus_match = _re.search(
+        r'\[Chorus\]\s*\n?([^\[]+?)(?=\n?\[|$)',
+        lyrics,
+        _re.IGNORECASE | _re.DOTALL
+    )
+    if chorus_match:
+        chorus = chorus_match.group(1).strip()
+        # 只取前 4-8 行
+        lines = [l.strip() for l in chorus.split('\n') if l.strip()]
+        if 4 <= len(lines) <= 12:
+            return '\n'.join(lines)
+        if len(lines) > 12:
+            return '\n'.join(lines[:8])
+
+    # 策略2: 找重复出现的段落（通常是副歌）
+    lines = [l.strip() for l in lyrics.split('\n') if l.strip() and not l.strip().startswith('[')]
+    if len(lines) >= 4:
+        # 简单策略：取中间 4-8 行（通常副歌在中间）
+        start = max(0, len(lines) // 3)
+        end = min(len(lines), start + 8)
+        return '\n'.join(lines[start:end])
+
+    return lyrics
 
 
 async def _fallback_improvise(

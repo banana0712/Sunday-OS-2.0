@@ -427,7 +427,7 @@ class VoiceService:
 
         print(f"🎵 [COVER] 生成翻唱: feature_id={cover_feature_id[:20]}... lyrics_len={len(lyrics)}")
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.post(MINIMAX_MUSIC_URL, headers=headers, json=payload)
             data = resp.json()
 
