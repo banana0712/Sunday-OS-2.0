@@ -363,19 +363,21 @@ async def _handle_song_cover(
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
     status_msg = await update.message.reply_text(f"让我想想《{song_name}》怎么唱... 🎵")
 
-    # ===== 步骤1: LLM 回忆歌曲信息（歌词 + 风格 + BPM + 情绪）=====
-    song_recall_prompt = f"""请回忆歌曲「{song_name}」的信息。
+    # ===== 步骤1: LLM 回忆歌曲信息（只取高潮4句 + 风格 + BPM + 情绪）=====
+    song_recall_prompt = f"""请回忆歌曲「{song_name}」的高潮/副歌部分。
 
 你需要输出：
-1. 这首歌最经典的4-6句歌词（必须是高潮/副歌部分，每句一行）
+1. 这首歌最经典的**4句**高潮/副歌歌词（只4句！每句一行，一定要是大家最熟悉的那几句）
 2. 这首歌的音乐风格（如抒情民谣、流行摇滚、R&B等）
 3. 大概的BPM（如76 BPM慢歌、120 BPM快歌）
 4. 歌曲情绪（如温暖治愈、伤感思念、热血励志）
 5. 适合的伴奏描述（如钢琴+弦乐、吉他+鼓等）
 
+注意：lyrics 只输出4句，不要多！这样唱得快！
+
 请只回复一个 JSON：
 {{
-  "lyrics": "[chorus]\\n歌词第一句\\n歌词第二句\\n...",
+  "lyrics": "[chorus]\\n最经典的第一句\\n第二句\\n第三句\\n第四句",
   "style": "抒情民谣",
   "bpm": "76 BPM",
   "mood": "温暖治愈，青春回忆",
