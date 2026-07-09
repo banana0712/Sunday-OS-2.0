@@ -1224,7 +1224,7 @@ def _is_quality_feedback(title: str, detail: str) -> bool:
 
 
 async def clean_nick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ /clean_nick 命令 — 清理错误的昵称记忆 """
+    """ /clean_nick 命令 — 查看和清理昵称记忆（需要确认，不直接删除）"""
     user_id = _get_user_id(update)
     
     # 查找所有带 [昵称] 标签的记忆
@@ -1242,20 +1242,54 @@ async def clean_nick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("没有找到昵称相关的记忆呢~")
         return
     
-    if context.args and context.args[0] == "all":
-        # /clean_nick all — 清理所有昵称记忆
-        count = 0
-        for m in nick_mems:
-            memory_store.set_memory_status(m["id"], "archived")
-            count += 1
-        await update.message.reply_text(f"✅ 已清理 {count} 条昵称记忆~\n下次聊天时你可以告诉我你喜欢怎么被称呼 💕")
+    if context.args:
+        action = context.args[0]
+        
+        if action == "all":
+            # /clean_nick all → 需要二次确认
+            await update.message.reply_text(
+                f"⚠️ 确认要归档全部 {len(nick_mems)} 条昵称记忆吗？\n"
+                f"输入 /clean_nick confirm 确认，或忽略此消息取消。"
+            )
+            return
+        
+        if action == "confirm":
+            # /clean_nick confirm → 执行清理
+            count = 0
+            for m in nick_mems:
+                memory_store.set_memory_status(m["id"], "archived")
+                count += 1
+            await update.message.reply_text(
+                f"✅ 已归档 {count} 条昵称记忆~\n"
+                f"下次聊天时告诉我你喜欢怎么被称呼就好 💕"
+            )
+            return
+        
+        # 按编号清理
+        try:
+            idx = int(action) - 1
+            if 0 <= idx < len(nick_mems):
+                m = nick_mems[idx]
+                memory_store.set_memory_status(m["id"], "archived")
+                await update.message.reply_text(f"✅ 已归档：{m.get('summary', m['content'])[:50]}")
+            else:
+                await update.message.reply_text("编号超出范围呢~")
+        except ValueError:
+            await update.message.reply_text("用法：/clean_nick <编号> 或 /clean_nick all（需要二次确认）")
         return
     
-    # 列出昵称记忆供用户选择
-    lines = ["📝 找到以下昵称记忆，用 /clean_nick <编号> 清理指定条目，或 /clean_nick all 清理全部：\n"]
+    # 无参数：列出昵称记忆
+    lines = [
+        "📝 以下记忆带有 [昵称] 标签：\n",
+        "清理：/clean_nick <编号> | 全部清理：/clean_nick all（需要确认）\n",
+    ]
     for i, m in enumerate(nick_mems):
-        summary = m.get("summary", m["content"])[:40]
-        lines.append(f"{i+1}. {summary}")
+        summary = m.get("summary", m["content"])[:50]
+        tags = m.get("tags", [])
+        if isinstance(tags, str):
+            try: tags = json.loads(tags)
+            except: tags = []
+        lines.append(f"{i+1}. {summary}  {' '.join(['#'+t for t in tags if t not in ('昵称','姓名')])}")
     
     await update.message.reply_text("\n".join(lines))
 
