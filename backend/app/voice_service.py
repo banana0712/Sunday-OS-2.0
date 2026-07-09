@@ -193,6 +193,9 @@ class VoiceService:
         """
         文字转语音，返回 MP3 音频数据。
 
+        长文本会自动按句分段合成后拼接，避免触发豆包
+        「input length too long (400)」的单次字数上限。
+
         Args:
             text: 要合成的文字
             emotion: 情感标签 (default/sweet/gentle/excited/lazy/shy/comfort)
@@ -201,7 +204,21 @@ class VoiceService:
             MP3 音频 bytes
         """
         context_text = EMOTION_PROMPTS.get(emotion, "")
+        chunks = self.split_for_tts(text, max_chars=200)
 
+        # 只有一段：直接合成，省去拼接
+        if len(chunks) == 1:
+            return await self._synthesize_chunk(chunks[0], context_text)
+
+        # 多段：逐段合成再拼接
+        audio_parts = []
+        for chunk in chunks:
+            audio = await self._synthesize_chunk(chunk, context_text)
+            audio_parts.append(audio)
+        return b"".join(audio_parts)
+
+    async def _synthesize_chunk(self, text: str, context_text: str = "") -> bytes:
+        """对单段文本调用豆包 TTS，返回 MP3 bytes"""
         additions = {}
         if context_text:
             additions["context_texts"] = [context_text]
@@ -269,14 +286,18 @@ class VoiceService:
             拼接后的 MP3 音频
         """
         audio_parts = []
-        for text, emotion in segments:
-            audio = await self.synthesize(text, emotion)
+        for seg_text, emotion in segments:
+            context_text = EMOTION_PROMPTS.get(emotion, "")
+            audio = await self._synthesize_chunk(seg_text, context_text)
             audio_parts.append(audio)
         return b"".join(audio_parts)
 
     @staticmethod
     def split_for_tts(text: str, max_chars: int = 300) -> list[str]:
-        """按句号分段，确保每段不超 TTS 限制"""
+        """
+        按句号/感叹号/问号分段，保证每段不超过 max_chars。
+        若单句本身超过 max_chars，再做硬切兜底，彻底避免超长报错。
+        """
         import re
         sentences = re.split(r'(?<=[。！？\n])\s*', text)
         chunks = []
@@ -285,11 +306,18 @@ class VoiceService:
             s = s.strip()
             if not s:
                 continue
+            # 单句本身超长：先硬切成不超过 max_chars 的小段
+            if len(s) > max_chars:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                for i in range(0, len(s), max_chars):
+                    chunks.append(s[i:i + max_chars])
+                continue
             if len(current) + len(s) <= max_chars:
                 current += s
             else:
-                if current:
-                    chunks.append(current)
+                chunks.append(current)
                 current = s
         if current:
             chunks.append(current)
