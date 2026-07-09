@@ -706,11 +706,110 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理文字消息"""
     user_id = _get_user_id(update)
     text = update.message.text or ""
+    chat_id = update.effective_chat.id
+
+    # ===== 先走 AI 意图判断 =====
+    action = await _detect_intent(text, user_id, update, context)
+    if action:
+        return  # 意图已被处理
 
     # 普通消息处理
     reply = await _process_message_text(text, user_id, update, context)
     if reply:
         await _send_smart_reply(update, reply)
+
+
+async def _detect_intent(text: str, user_id: str, update: Update, context) -> bool:
+    """
+    AI 意图判断：唱歌 or 推送邮件 or 普通聊天。
+    返回 True 表示意图已被处理，False 表示继续正常聊天。
+    """
+    from app.main import llm_service
+    from app.voice_service import voice_service
+
+    recent_messages = memory_store.get_conversation_context(user_id, max_turns=3) or ""
+    chat_id = update.effective_chat.id
+
+    intent_prompt = f"""你是 Sunday。请判断用户的意图。
+
+用户说：「{text}」
+
+最近对话：
+{recent_messages[:500]}
+
+请判断用户的意图，回复一个 JSON：
+{{"action": "sing/push_email/chat 三选一", "reason": "一句话判断理由"}}
+
+判断规则：
+- 明确要求唱歌/唱某首歌/来一首 → "sing"
+- 要求推送邮件/发邮件/发周报/发日报/发早安 → "push_email"
+- 普通聊天/提问/闲聊 → "chat"
+
+## 如果 action="sing"，额外输出：
+{{"action": "sing", "song_name": "歌曲名", "sing_mode": "verse_chorus/chorus_only/full_structure/cover_mode", "lyrics": "[verse]\\n歌词...\\n\\n[chorus]\\n歌词...", "style": "抒情民谣", "bpm": "76 BPM", "mood": "温暖治愈", "instruments": "钢琴加弦乐"}}
+
+## 如果 action="push_email"，额外输出：
+{{"action": "push_email", "template": "morning/weekly/fortune/knowledge/creative 选一个", "topic": "用户想要的主题描述"}}
+
+只回复 JSON，不要其他文字。"""
+
+    try:
+        intent_resp = await llm_service.client.chat.completions.create(
+            model=llm_service.model_fast,
+            messages=[{"role": "user", "content": intent_prompt}],
+            max_tokens=800,
+            temperature=0.3,
+        )
+        intent_text = intent_resp.choices[0].message.content or ""
+        print(f"🤖 [INTENT-TEXT] AI 意图: {intent_text[:200]}")
+
+        intent_info = _extract_json(intent_text)
+        if not intent_info:
+            return False
+
+        action = intent_info.get("action", "chat")
+        print(f"🤖 [INTENT-TEXT] action={action}")
+
+        if action == "sing":
+            specified_song = intent_info.get("song_name", "")
+            sing_mode = intent_info.get("sing_mode", "verse_chorus")
+            full_lyrics = intent_info.get("lyrics", "")
+            if specified_song and len(specified_song) >= 2:
+                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+                await _handle_sing_one_shot(
+                    update=update, context=context, chat_id=chat_id,
+                    song_name=specified_song, song_style="甜美可爱的女声，J-Pop",
+                    sing_mode=sing_mode, full_lyrics=full_lyrics,
+                    style_info=intent_info.get("style", ""),
+                    bpm_info=intent_info.get("bpm", ""),
+                    mood_info=intent_info.get("mood", ""),
+                    instruments_info=intent_info.get("instruments", ""),
+                    voice_service=voice_service,
+                )
+            else:
+                await _handle_improvise(update, chat_id, "甜美可爱的女声", voice_service, llm_service)
+            return True
+
+        if action == "push_email":
+            push_template = intent_info.get("template", "morning")
+            push_topic = intent_info.get("topic", "")
+            print(f"📧 [PUSH-TEXT] template={push_template} topic={push_topic}")
+            await _handle_email_push(update, context, chat_id, push_template, push_topic)
+            return True
+
+        return False  # action=chat
+
+    except Exception as e:
+        print(f"🤖 [INTENT-TEXT] 判断失败: {e}")
+        # 降级：简单关键词
+        import re as _re
+        if _re.search(r'推送|发邮件|邮件|周报|日报', text):
+            await _handle_email_push(update, context, chat_id, "morning", "")
+            return True
+        if _re.search(r'唱(?:歌|一|首)|来一?首', text):
+            await update.message.reply_text("唱歌功能暂时只支持语音哦~ 试试发语音给我 🎵")
+            return True
+        return False
 
 async def _send_smart_reply(update: Update, text: str):
     """智能发送回复，根据内容长度选择文字或语音"""
