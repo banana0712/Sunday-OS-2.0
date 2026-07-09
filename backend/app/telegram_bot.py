@@ -325,27 +325,44 @@ def _build_llm_user_context(user_id: str) -> dict:
     """
     统一的记忆上下文构建器 — 所有 LLM 调用共享。
     
-    核心理念：把原始记忆数据给 LLM，让它自己理解用户，
-    而不是用正则/规则去机械提取。LLM 比任何规则都更懂语义。
+    核心理念：把原始记忆数据（含标签）给 LLM，让它自己理解用户。
+    标签信息帮助 LLM 区分：哪些是「昵称」、哪些是「用户名」、哪些是「偏好」。
     """
     stats = memory_store.get_stats(user_id)
     
-    # 收集所有活跃记忆的原始文本
+    # 收集所有活跃记忆的原始文本（含标签）
     facts = memory_store.search(user_id, category="fact", limit=10)
     prefs = memory_store.search(user_id, category="preference", limit=5)
     
-    # 构建纯文本记忆摘要（给 LLM 读的，不是给代码解析的）
+    # 构建带标签的记忆摘要，让 LLM 理解上下文
     memory_lines = []
     for f in facts:
         summary = f.get("summary", f.get("content", ""))
+        tags = f.get("tags", [])
+        if isinstance(tags, str):
+            try: tags = json.loads(tags)
+            except: tags = []
+        tag_str = f" [{', '.join(tags)}]" if tags else ""
         if summary:
-            memory_lines.append(f"- {summary}")
+            memory_lines.append(f"- {summary}{tag_str}")
+    
     for p in prefs:
         summary = p.get("summary", p.get("content", ""))
+        tags = p.get("tags", [])
+        if isinstance(tags, str):
+            try: tags = json.loads(tags)
+            except: tags = []
+        tag_str = f" [{', '.join(tags)}]" if tags else ""
         if summary:
-            memory_lines.append(f"- [偏好] {summary}")
+            memory_lines.append(f"- [偏好] {summary}{tag_str}")
     
-    memory_text = "\n".join(memory_lines) if memory_lines else "还不太了解这位用户呢~"
+    # 添加明确指导，帮助 LLM 理解称呼
+    guidance = """【称呼使用指南】
+- 从带 [昵称] 标签的记忆中找亲昵称呼（如「酱酱」「宝宝」）
+- 如果 [昵称] 标签的内容是用户名/账号名（如「香蕉麻辣酱」），这不是日常称呼，不要用
+- 如果没有合适的亲昵称呼，直接用「你」或自然称呼，不要硬凑"""
+    
+    memory_text = guidance + "\n\n【记忆库】\n" + ("\n".join(memory_lines) if memory_lines else "还不太了解这位用户呢~")
     
     # 最近对话
     recent = memory_store.get_conversation_context(user_id, max_turns=8) or ""
@@ -1206,6 +1223,43 @@ def _is_quality_feedback(title: str, detail: str) -> bool:
     return True
 
 
+async def clean_nick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /clean_nick 命令 — 清理错误的昵称记忆 """
+    user_id = _get_user_id(update)
+    
+    # 查找所有带 [昵称] 标签的记忆
+    facts = memory_store.search(user_id, category="fact", limit=20)
+    nick_mems = []
+    for f in facts:
+        tags = f.get("tags", [])
+        if isinstance(tags, str):
+            try: tags = json.loads(tags)
+            except: tags = []
+        if "昵称" in tags or "姓名" in tags:
+            nick_mems.append(f)
+    
+    if not nick_mems:
+        await update.message.reply_text("没有找到昵称相关的记忆呢~")
+        return
+    
+    if context.args and context.args[0] == "all":
+        # /clean_nick all — 清理所有昵称记忆
+        count = 0
+        for m in nick_mems:
+            memory_store.set_memory_status(m["id"], "archived")
+            count += 1
+        await update.message.reply_text(f"✅ 已清理 {count} 条昵称记忆~\n下次聊天时你可以告诉我你喜欢怎么被称呼 💕")
+        return
+    
+    # 列出昵称记忆供用户选择
+    lines = ["📝 找到以下昵称记忆，用 /clean_nick <编号> 清理指定条目，或 /clean_nick all 清理全部：\n"]
+    for i, m in enumerate(nick_mems):
+        summary = m.get("summary", m["content"])[:40]
+        lines.append(f"{i+1}. {summary}")
+    
+    await update.message.reply_text("\n".join(lines))
+
+
 def start_telegram_bot():
     """启动 Telegram Bot（返回 application 对象，在主线程事件循环中运行）"""
     print("🤖 start_telegram_bot() 被调用")
@@ -1227,6 +1281,7 @@ def start_telegram_bot():
         # app.add_handler(CommandHandler("记忆", memory_cmd))  # Telegram 命令不支持中文
         app.add_handler(CommandHandler("report", report_cmd))
         app.add_handler(CommandHandler("knowledge", knowledge_cmd))
+        app.add_handler(CommandHandler("clean_nick", clean_nick_cmd))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         app.add_error_handler(error_handler)
         
