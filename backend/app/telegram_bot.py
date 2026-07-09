@@ -350,76 +350,108 @@ async def _handle_song_cover(
     voice_service,
 ):
     """
-    处理指定歌曲翻唱。
-    策略：
-    1. 尝试 yt-dlp 从 YouTube 搜索下载原曲
-    2. 如果失败，提示用户发送歌曲链接或音频文件
-    3. 降级为即兴创作
+    AI 驱动的歌曲搜索 + 翻唱。
+    流程：
+    1. 网易云搜索歌曲
+    2. AI 筛选最匹配的结果
+    3. 获取试听链接
+    4. 预处理 + 翻唱
+    如果找不到，降级为即兴创作。
     """
-    voice_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "voice")
-    os.makedirs(voice_dir, exist_ok=True)
-    base_url = settings.public_base_url or os.environ.get("RAILWAY_PUBLIC_URL", "")
+    import re as _re
 
-    original_audio_url = None
-    local_audio_path = None
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+    await update.message.reply_text(f"让我在网上找找《{song_name}》... 🔍")
 
-    # ===== 策略1: yt-dlp 搜索下载 =====
-    try:
-        print(f"🎵 [COVER] 尝试 yt-dlp 搜索: {song_name}")
-        import yt_dlp
+    # ===== 步骤1: 网易云搜索歌曲 =====
+    search_results = await voice_service.search_song(song_name, limit=10)
 
-        output_template = os.path.join(voice_dir, f"cover_orig_{uuid.uuid4().hex[:8]}.%(ext)s")
-        ydl_opts = {
-            "format": "bestaudio[filesize<10M]/bestaudio/best",
-            "outtmpl": output_template,
-            "max_filesize": 10 * 1024 * 1024,
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "socket_timeout": 15,
-            "extract_flat": False,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([f"ytsearch1:{song_name} 官方MV 原版"])
-
-        import glob as _glob
-        matches = _glob.glob(os.path.join(voice_dir, "cover_orig_*"))
-        for m in matches:
-            if os.path.isfile(m) and os.path.getsize(m) > 1000:
-                local_audio_path = m
-                print(f"🎵 [COVER] yt-dlp 成功: {local_audio_path} ({os.path.getsize(m)} bytes)")
-                break
-    except Exception as e:
-        print(f"🎵 [COVER] yt-dlp 失败: {e}")
-
-    # ===== 策略2: 如果 yt-dlp 失败，提示用户发送链接 =====
-    if not local_audio_path:
-        print(f"🎵 [COVER] 无法自动获取原曲，提示用户")
-        await update.message.reply_text(
-            f"我暂时找不到《{song_name}》的在线音源 😢\n\n"
-            f"你可以帮我一下吗：\n"
-            f"1. 发一个 YouTube/网易云/QQ音乐的歌曲链接给我\n"
-            f"2. 或者直接发这首歌曲的音频文件\n\n"
-            f"我就能用 Sunday 的风格翻唱啦！🎵"
-        )
-        # 记录用户状态：等待歌曲链接
-        context.user_data["awaiting_song_url"] = {
-            "song_name": song_name,
-            "song_style": song_style,
-        }
+    if not search_results:
+        print(f"🎵 [COVER] 网易云搜索无结果")
+        await _fallback_improvise(update, chat_id, song_name, song_style, llm_service, voice_service)
         return
 
-    # ===== 找到原曲，继续翻唱流程 =====
-    if local_audio_path and base_url:
-        filename = os.path.basename(local_audio_path)
-        original_audio_url = f"{base_url.rstrip('/')}/voice/{filename}"
+    # ===== 步骤2: AI 筛选最匹配的歌曲 =====
+    candidates_text = ""
+    for i, s in enumerate(search_results):
+        candidates_text += f"[{i}] {s['name']} - {s['artists']} (专辑: {s['album']})\n"
+
+    selection_prompt = f"""请从以下搜索结果中选出最匹配用户想要的歌曲。
+
+用户想听：{song_name}
+
+搜索结果：
+{candidates_text}
+
+选择规则：
+- 优先选歌名完全匹配的
+- 其次选歌名包含用户关键词的
+- 原唱优先于翻唱
+- 如果搜索结果和用户想要的完全不同，返回 index=-1
+
+请只回复一个 JSON：
+{{"index": 0, "reason": "选择原因（一句话）"}}"""
+
+    selected_index = 0
+    try:
+        sel_resp = await llm_service.client.chat.completions.create(
+            model=llm_service.model_fast,
+            messages=[{"role": "user", "content": selection_prompt}],
+            max_tokens=100,
+            temperature=0.2,
+        )
+        sel_text = sel_resp.choices[0].message.content or ""
+        print(f"🎵 [COVER] AI 筛选结果: {sel_text[:200]}")
+
+        json_match = _re.search(r'\{[^}]+\}', sel_text)
+        if json_match:
+            sel = json.loads(json_match.group())
+            selected_index = sel.get("index", 0)
+            reason = sel.get("reason", "")
+            print(f"🎵 [COVER] 选中 [{selected_index}]: {reason}")
+    except Exception as e:
+        print(f"🎵 [COVER] AI 筛选失败: {e}，使用第一个结果")
+
+    if selected_index < 0 or selected_index >= len(search_results):
+        print(f"🎵 [COVER] AI 认为没有匹配结果")
+        await _fallback_improvise(update, chat_id, song_name, song_style, llm_service, voice_service)
+        return
+
+    selected = search_results[selected_index]
+    song_id = selected["id"]
+    matched_name = selected["name"]
+    matched_artist = selected["artists"]
+
+    await update.message.reply_text(f"找到啦：《{matched_name}》- {matched_artist} 🎶")
+
+    # ===== 步骤3: 获取试听链接 =====
+    song_url = await voice_service.get_song_url(song_id, bitrate=128000)
+
+    if not song_url:
+        print(f"🎵 [COVER] 歌曲 {matched_name} 无试听链接（可能需要VIP）")
+        # 尝试其他搜索结果
+        for i, alt_song in enumerate(search_results):
+            if i == selected_index:
+                continue
+            alt_url = await voice_service.get_song_url(alt_song["id"], bitrate=128000)
+            if alt_url:
+                song_url = alt_url
+                matched_name = alt_song["name"]
+                matched_artist = alt_song["artists"]
+                await update.message.reply_text(f"原版需要VIP，找到了一个可用的版本：《{matched_name}》- {matched_artist} 🎶")
+                break
+
+    if not song_url:
+        print(f"🎵 [COVER] 所有结果都没有试听链接")
+        await _fallback_improvise(update, chat_id, song_name, song_style, llm_service, voice_service)
+        return
+
+    # ===== 步骤4: 用歌曲 URL 直接翻唱 =====
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+    await update.message.reply_text("正在分析旋律... 🎶")
 
     try:
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-        await update.message.reply_text(f"找到《{song_name}》啦！正在分析旋律... 🎶")
-
-        preprocess_result = await voice_service.preprocess_cover(original_audio_url)
+        preprocess_result = await voice_service.preprocess_cover(song_url)
         feature_id = preprocess_result["cover_feature_id"]
         extracted_lyrics = preprocess_result.get("formatted_lyrics", "")
 
@@ -445,12 +477,43 @@ async def _handle_song_cover(
         print(f"🎵 [COVER] 翻唱流程失败: {cover_e}")
         raise
 
-    finally:
-        if local_audio_path and os.path.exists(local_audio_path):
-            try:
-                os.remove(local_audio_path)
-            except:
-                pass
+
+async def _fallback_improvise(
+    update: Update,
+    chat_id: int,
+    song_name: str,
+    song_style: str,
+    llm_service,
+    voice_service,
+):
+    """降级：即兴创作"""
+    await update.message.reply_text(
+        f"唔... 我没找到《{song_name}》的音源，不过我可以即兴创作一首！🎵",
+    )
+    lyrics_prompt = f"""请以「{song_name}」为主题创作一首简短可爱的歌词。
+
+要求：
+- 4-8句歌词，每句一行，用换行分隔
+- 用[verse]和[chorus]标记段落
+- 如果这是一首知名歌曲，尽量回忆并写出它的经典歌词片段
+- 只输出歌词本身，不要任何其他文字"""
+
+    song_resp = await llm_service.client.chat.completions.create(
+        model=llm_service.model_fast,
+        messages=[{"role": "user", "content": lyrics_prompt}],
+        max_tokens=300,
+        temperature=0.9,
+    )
+    lyrics = song_resp.choices[0].message.content or ""
+
+    audio_reply = await voice_service.generate_music(
+        lyrics=lyrics,
+        style=song_style,
+    )
+    import io
+    voice_file = io.BytesIO(audio_reply)
+    voice_file.name = "song.mp3"
+    await context.bot.send_voice(chat_id=chat_id, voice=voice_file, caption="")
 
 
 def _record_voice_usage(user_id: str):
@@ -518,108 +581,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = _get_user_id(update)
     text = update.message.text or ""
 
-    # 检查是否在等待歌曲链接/音频
-    if context.user_data.get("awaiting_song_url"):
-        await _handle_song_url_input(update, context, user_id, text)
-        return
-
     # 普通消息处理
     reply = await _process_message_text(text, user_id, update, context)
     if reply:
         await _send_smart_reply(update, reply)
-
-
-async def _handle_song_url_input(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str, text: str):
-    """处理用户发来的歌曲链接或音频文件"""
-    from app.voice_service import voice_service
-    from app.main import llm_service
-
-    song_info = context.user_data.pop("awaiting_song_url", {})
-    song_name = song_info.get("song_name", "这首歌曲")
-    song_style = song_info.get("song_style", "甜美可爱的女声，J-Pop")
-    chat_id = update.effective_chat.id
-
-    # 检查是否是 URL
-    import re as _re
-    url_match = _re.search(r'https?://\S+', text)
-    audio_url = url_match.group(0) if url_match else None
-
-    if not audio_url:
-        await update.message.reply_text(
-            f"我没看到链接呢 😢\n"
-            f"请发一个 YouTube/网易云/QQ音乐的歌曲链接，\n"
-            f"或者直接发音频文件给我~"
-        )
-        # 重新设置等待状态
-        context.user_data["awaiting_song_url"] = song_info
-        return
-
-    # 用户发了链接，开始处理
-    await update.message.reply_text(f"收到链接！让我来翻唱《{song_name}》... 🎵")
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-
-    try:
-        # 如果是 YouTube 链接，尝试用 yt-dlp 下载
-        if "youtube.com" in audio_url or "youtu.be" in audio_url:
-            await update.message.reply_text("正在从 YouTube 下载... ⬇️")
-            voice_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "voice")
-            os.makedirs(voice_dir, exist_ok=True)
-            base_url = settings.public_base_url or os.environ.get("RAILWAY_PUBLIC_URL", "")
-
-            try:
-                import yt_dlp
-                output_template = os.path.join(voice_dir, f"cover_orig_{uuid.uuid4().hex[:8]}.%(ext)s")
-                ydl_opts = {
-                    "format": "bestaudio[filesize<10M]/bestaudio/best",
-                    "outtmpl": output_template,
-                    "max_filesize": 10 * 1024 * 1024,
-                    "noplaylist": True,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "socket_timeout": 15,
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([audio_url])
-
-                import glob as _glob
-                matches = _glob.glob(os.path.join(voice_dir, "cover_orig_*"))
-                for m in matches:
-                    if os.path.isfile(m) and os.path.getsize(m) > 1000:
-                        audio_url = f"{base_url.rstrip('/')}/voice/{os.path.basename(m)}"
-                        print(f"🎵 [COVER] YouTube 下载成功: {audio_url}")
-                        break
-            except Exception as e:
-                print(f"🎵 [COVER] YouTube 下载失败: {e}")
-                await update.message.reply_text("下载失败了 😢 试试直接发音频文件给我吧")
-                return
-
-        # 用音频 URL 进行翻唱
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-        await update.message.reply_text("正在分析原曲旋律... 🎶")
-
-        preprocess_result = await voice_service.preprocess_cover(audio_url)
-        feature_id = preprocess_result["cover_feature_id"]
-        extracted_lyrics = preprocess_result.get("formatted_lyrics", "")
-
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-        await update.message.reply_text("正在用 Sunday 的风格翻唱... 🎤")
-
-        cover_prompt = f"甜美可爱的女声，J-Pop动漫主题曲风格，温柔甜美，{song_style}"
-        audio_reply = await voice_service.generate_cover(
-            cover_feature_id=feature_id,
-            lyrics=extracted_lyrics,
-            prompt=cover_prompt,
-        )
-
-        import io
-        voice_file = io.BytesIO(audio_reply)
-        voice_file.name = "cover.mp3"
-        await context.bot.send_voice(chat_id=chat_id, voice=voice_file, caption="")
-
-    except Exception as e:
-        print(f"🎵 [COVER] 链接翻唱失败: {e}")
-        await update.message.reply_text("唔... 翻唱出了点小问题，可能是链接格式不支持 😢")
-
 
 async def _send_smart_reply(update: Update, text: str):
     """智能发送回复，根据内容长度选择文字或语音"""

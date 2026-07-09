@@ -446,6 +446,76 @@ class VoiceService:
 
         return bytes.fromhex(audio_hex)
 
+    # ========== 网易云音乐搜索（用于翻唱原曲获取）==========
+
+    NETEASE_SEARCH_URL = "https://music.163.com/api/search/get"
+    NETEASE_SONG_URL = "https://music.163.com/api/song/enhance/player/url"
+
+    async def search_song(self, keyword: str, limit: int = 10) -> list[dict]:
+        """
+        用网易云音乐 API 搜索歌曲。
+
+        Returns:
+            [{"id": 185709, "name": "稻香", "artists": "周杰伦", "album": "魔杰座", "fee": 0}, ...]
+        """
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://music.163.com/",
+        }
+
+        params = {"s": keyword, "type": 1, "limit": limit}
+
+        print(f"🔍 [MUSIC-SEARCH] 搜索: {keyword}")
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(self.NETEASE_SEARCH_URL, params=params, headers=headers)
+            data = resp.json()
+
+        songs = data.get("result", {}).get("songs", [])
+        results = []
+        for s in songs:
+            results.append({
+                "id": s["id"],
+                "name": s["name"],
+                "artists": "/".join(a["name"] for a in s.get("artists", [])),
+                "album": s.get("album", {}).get("name", ""),
+                "fee": s.get("fee", 0),  # 0=免费, 1=VIP, 8=可试听
+                "duration": s.get("duration", 0),
+            })
+
+        print(f"🔍 [MUSIC-SEARCH] 找到 {len(results)} 首: {[(r['name'], r['artists']) for r in results[:5]]}")
+        return results
+
+    async def get_song_url(self, song_id: int, bitrate: int = 128000) -> str:
+        """
+        获取网易云歌曲的试听/播放链接。
+
+        Args:
+            song_id: 歌曲 ID
+            bitrate: 比特率（128000/320000）
+
+        Returns:
+            可直接播放的 MP3 URL，或空字符串
+        """
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://music.163.com/",
+        }
+
+        params = {"id": song_id, "ids": f"[{song_id}]", "br": bitrate}
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(self.NETEASE_SONG_URL, params=params, headers=headers)
+            data = resp.json()
+
+        song_url = data.get("data", [{}])[0].get("url", "")
+        if song_url:
+            print(f"🔗 [MUSIC-URL] ID={song_id} → {song_url[:80]}...")
+        else:
+            print(f"🔗 [MUSIC-URL] ID={song_id} → (无可用链接，可能需VIP)")
+
+        return song_url or ""
+
     @staticmethod
     def split_for_tts(text: str, max_chars: int = 300) -> list[str]:
         """
