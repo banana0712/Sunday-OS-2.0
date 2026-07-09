@@ -170,14 +170,13 @@ class VoiceService:
         """
         文字转语音，返回 MP3 音频数据。
         长文本自动分段合成后拼接。
-
-        Args:
-            text: 要合成的文字
-            emotion: 情感标签 (default/sweet/gentle/excited/lazy/shy/comfort)
-
-        Returns:
-            MP3 音频 bytes
+        自动去掉括号里的动作描述（如"清了清嗓子"），避免被读出来。
         """
+        import re
+        # 清洗：去掉括号里的内容（动作描述、状态提示等）
+        text = re.sub(r'[（(].*?[）)]', '', text)
+        text = text.strip()
+
         context_text = EMOTION_PROMPTS.get(emotion, "")
         chunks = self.split_for_tts(text, max_chars=200)
 
