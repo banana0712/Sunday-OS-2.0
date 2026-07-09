@@ -156,11 +156,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             _record_voice_usage(user_id)
             return
 
-        # 7. 同时发送文字版
-        await update.message.reply_text("📝 文字版：")
-        await _send_smart_reply(update, reply)
-
-        # 8. 记录语音配额
+        # 7. 记录语音配额
         _record_voice_usage(user_id)
 
     except Exception as e:
