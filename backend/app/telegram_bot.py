@@ -137,7 +137,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # 获取最近的对话上下文
         recent_messages = memory_store.get_conversation_context(user_id, max_turns=3) or ""
 
-        song_decision_prompt = f"""你是 Sunday，一个会唱歌的 AI 女孩。请判断用户是否想让你唱歌。
+        song_decision_prompt = f"""你是 Sunday，一个会唱歌的 AI 女孩。请判断用户是否想让你唱歌，并提取歌曲名。
 
 用户说：「{text}」
 
@@ -149,17 +149,23 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 - 提到音乐、旋律、歌曲相关 → 唱歌
 - 普通聊天、提问、闲聊 → 不唱歌
 
+歌曲名提取：
+- 如果用户指定了具体歌曲（如"唱小幸运""唱稻香""来一首青花瓷"），提取歌曲名
+- 注意去掉量词（"一首""一个""首"）和语气词（"吧""呗""嘛"）
+- 如果没指定具体歌曲，song_name 留空
+
 请只回复一个 JSON：
-{{"should_sing": true/false, "song_theme": "歌曲主题描述，如用户指定了主题就按用户的意思，否则根据上下文推断一个合适的主题", "style": "音乐风格描述，如甜美J-Pop、温柔民谣、轻快儿歌等"}}"""
+{{"should_sing": true/false, "song_name": "歌曲名（如小幸运、稻香），没指定则留空", "song_theme": "歌曲主题描述，如用户指定了主题就按用户的意思，否则根据上下文推断", "style": "音乐风格描述，如甜美J-Pop、温柔民谣等"}}"""
 
         should_sing = False
         song_theme = ""
         song_style = "甜美可爱的女声，轻快J-Pop，动漫主题曲风格"
+        specified_song = ""  # AI 提取的歌曲名
         try:
             decision_resp = await llm_service.client.chat.completions.create(
                 model=llm_service.model_fast,
                 messages=[{"role": "user", "content": song_decision_prompt}],
-                max_tokens=150,
+                max_tokens=200,
                 temperature=0.3,
             )
             decision_text = decision_resp.choices[0].message.content or ""
@@ -172,6 +178,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 should_sing = decision.get("should_sing", False)
                 song_theme = decision.get("song_theme", "")
                 song_style = decision.get("style", song_style)
+                specified_song = decision.get("song_name", "")
         except Exception as e:
             print(f"🎵 [MUSIC] AI 判断失败: {e}")
             # 降级：用关键词兜底
@@ -182,14 +189,23 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             print(f"🎵 [MUSIC] AI 决定唱歌！主题={song_theme} 风格={song_style}")
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
             try:
-                # 判断用户是否指定了歌曲名
+                # AI 已提取歌曲名，正则作为兜底清洗
                 import re as _re
-                # 更灵活的歌曲名匹配
-                song_name_match = _re.search(
-                    r'(?:唱|来一?首|点一首?|会唱|唱首|唱个)(.{1,20}?)(?:这首歌|那首歌|这首|那首|给我听|吧|呗|嘛|好吗|可以吗|好不好)?$',
-                    text
-                )
-                specified_song = song_name_match.group(1).strip() if song_name_match else ""
+                if specified_song:
+                    # 清洗 AI 提取的歌曲名
+                    specified_song = _re.sub(r'^[一首一个首个]+', '', specified_song)
+                    specified_song = _re.sub(r'[。！？.!?]+$', '', specified_song)
+                    specified_song = specified_song.strip()
+                else:
+                    # 兜底：正则提取
+                    song_name_match = _re.search(
+                        r'(?:唱|来一?首|点一首?|会唱|唱首|唱个)(.{1,20}?)(?:这首歌|那首歌|这首|那首|给我听|吧|呗|嘛|好吗|可以吗|好不好)?$',
+                        text
+                    )
+                    specified_song = song_name_match.group(1).strip() if song_name_match else ""
+                    specified_song = _re.sub(r'^[一首一个首个]+', '', specified_song)
+                    specified_song = _re.sub(r'[。！？.!?]+$', '', specified_song)
+                    specified_song = specified_song.strip()
 
                 if specified_song and len(specified_song) >= 2:
                     # ===== 指定歌曲 → 翻唱模式（保留原曲旋律）=====
