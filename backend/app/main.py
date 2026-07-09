@@ -237,6 +237,21 @@ def _is_quality_memory(summary: str) -> bool:
     if summary in ["昵称是啥", "用户称Sunday为", "你想叫我啥"]:
         return False
 
+    # 昵称太长（>4字）通常不是亲昵称呼，是用户名/账号名
+    # 「香蕉麻辣酱」「超级无敌大帅哥」这类不是日常称呼
+    if "昵称" in summary or "称呼" in summary or "叫" in summary:
+        # 检查是否提取了过长的昵称
+        import re
+        nick_patterns = [
+            r'昵称[是为叫][「「]?(.{5,})',
+            r'称呼[是为叫][「「]?(.{5,})',
+            r'叫[他她它我你][「「]?(.{5,})',
+        ]
+        for p in nick_patterns:
+            m = re.search(p, summary)
+            if m and len(m.group(1).strip()) > 4:
+                return False  # 昵称太长，不可信
+
     return True
 
 

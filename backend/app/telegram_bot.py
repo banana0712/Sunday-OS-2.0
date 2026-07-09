@@ -324,22 +324,54 @@ def _build_llm_user_context(user_id: str) -> dict:
     """
     stats = memory_store.get_stats(user_id)
     
-    # 昵称：从记忆中找用户喜欢的称呼
-    # 优先找「昵称」标签，再找「姓名」标签
+    # ── 智能昵称提取 ──
+    # 不只依赖标签，而是分析 summary 内容找出真正该用的称呼
     name = ""
     alt_names = []
     facts = memory_store.search(user_id, category="fact", limit=10)
+    
     for f in facts:
         tags = f.get("tags", [])
-        if "昵称" in tags:
+        if isinstance(tags, str):
+            try: tags = json.loads(tags)
+            except: tags = []
+        
+        summary = f.get("summary", "")
+        
+        if "昵称" in tags or "姓名" in tags:
             for tag in tags:
-                if tag not in ["昵称", "姓名", "用户"] and len(tag) <= 6:
-                    name = tag  # 第一个昵称作为主称呼
-                    break
-        if "姓名" in tags:
-            for tag in tags:
-                if tag not in ["昵称", "姓名", "用户"] and len(tag) <= 6 and tag != name:
-                    alt_names.append(tag)
+                if tag in ["昵称", "姓名", "用户"]:
+                    continue
+                # 昵称质量检查：太长的（>4字）可能是用户名/全名，不是亲昵称呼
+                # 「酱酱」「宝宝」是好的，「香蕉麻辣酱」太长了
+                clean = tag.strip()
+                if len(clean) <= 4 and not any(c in clean for c in ['@', '#', 'http']):
+                    if not name:
+                        name = clean
+                    elif clean != name:
+                        alt_names.append(clean)
+    
+    # 如果没找到昵称标签，从 summary 中智能提取
+    if not name:
+        for f in facts:
+            summary = f.get("summary", "")
+            # 匹配「喜欢被叫XX」「叫我XX」「自称XX」等模式
+            import re
+            patterns = [
+                r'喜欢被叫[「「]?(.{1,4})[」」]?',
+                r'叫我[「「]?(.{1,4})[」」]?',
+                r'称呼[是为][「「]?(.{1,4})[」」]?',
+                r'昵称[是为][「「]?(.{1,4})[」」]?',
+            ]
+            for p in patterns:
+                m = re.search(p, summary)
+                if m:
+                    candidate = m.group(1).strip()
+                    if 1 <= len(candidate) <= 4 and candidate not in ['你', '我', '他', '她', '它']:
+                        name = candidate
+                        break
+            if name:
+                break
     
     # 事实信息
     fact_texts = []
@@ -361,10 +393,12 @@ def _build_llm_user_context(user_id: str) -> dict:
         profile_parts.append(f"关于用户：{'；'.join(fact_texts[:5])}")
     if pref_texts:
         profile_parts.append(f"用户偏好：{'；'.join(pref_texts[:5])}")
+    if name:
+        profile_parts.append(f"用户喜欢的称呼：{name}")
     
     return {
-        "name": name,                    # 主昵称，如 "酱酱"
-        "alt_names": alt_names,          # 备选称呼
+        "name": name,
+        "alt_names": alt_names,
         "facts": fact_texts,
         "prefs": pref_texts,
         "recent_chat": recent,
