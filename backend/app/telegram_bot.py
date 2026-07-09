@@ -315,22 +315,69 @@ def _split_long_segment(text: str) -> list[str]:
     return chunks or [text[:800]]
 
 
-def _build_user_profile(user_id: str) -> str:
-    """构建用户画像"""
+def _build_llm_user_context(user_id: str) -> dict:
+    """
+    统一的记忆上下文构建器 — 所有 LLM 调用共享。
+    返回完整的用户画像，让 Sunday 每次说话都「知道自己在和谁说话」。
+    
+    这是情感连续性的基础：没有它，Sunday 的每句话都是孤立无根的。
+    """
     stats = memory_store.get_stats(user_id)
-    if stats["total"] == 0:
-        return "这是一位新朋友，还不太了解呢~"
     
-    parts = []
-    facts = memory_store.search(user_id, category="fact", limit=3)
+    # 昵称：从记忆中找用户喜欢的称呼
+    # 优先找「昵称」标签，再找「姓名」标签
+    name = ""
+    alt_names = []
+    facts = memory_store.search(user_id, category="fact", limit=10)
     for f in facts:
-        parts.append(f.get("summary", f["content"]))
+        tags = f.get("tags", [])
+        if "昵称" in tags:
+            for tag in tags:
+                if tag not in ["昵称", "姓名", "用户"] and len(tag) <= 6:
+                    name = tag  # 第一个昵称作为主称呼
+                    break
+        if "姓名" in tags:
+            for tag in tags:
+                if tag not in ["昵称", "姓名", "用户"] and len(tag) <= 6 and tag != name:
+                    alt_names.append(tag)
     
-    prefs = memory_store.search(user_id, category="preference", limit=3)
+    # 事实信息
+    fact_texts = []
+    for f in facts:
+        fact_texts.append(f.get("summary", f["content"]))
+    
+    # 偏好
+    prefs = memory_store.search(user_id, category="preference", limit=5)
+    pref_texts = []
     for p in prefs:
-        parts.append(p.get("summary", p["content"]))
+        pref_texts.append(p.get("summary", p["content"]))
     
-    return "、".join(parts) if parts else f"已存储 {stats['total']} 条记忆"
+    # 最近对话上下文
+    recent = memory_store.get_conversation_context(user_id, max_turns=5) or ""
+    
+    # 用户画像文本
+    profile_parts = []
+    if fact_texts:
+        profile_parts.append(f"关于用户：{'；'.join(fact_texts[:5])}")
+    if pref_texts:
+        profile_parts.append(f"用户偏好：{'；'.join(pref_texts[:5])}")
+    
+    return {
+        "name": name,                    # 主昵称，如 "酱酱"
+        "alt_names": alt_names,          # 备选称呼
+        "facts": fact_texts,
+        "prefs": pref_texts,
+        "recent_chat": recent,
+        "profile_text": "\n".join(profile_parts) if profile_parts else "还不太了解这位用户呢~",
+        "total_memories": stats["total"],
+        "is_new": stats["total"] == 0,
+    }
+
+
+def _build_user_profile(user_id: str) -> str:
+    """构建用户画像（兼容旧接口）"""
+    ctx = _build_llm_user_context(user_id)
+    return ctx["profile_text"]
 
 
 # ============================================================
@@ -946,30 +993,30 @@ async def _auto_check_plan_done(message: str, user_id: str, update: Update):
 async def _generate_ack_reply(llm_client, topic: str | None, user_id: str) -> str:
     """
     让 AI 生成多样化的「正在创作」告知语。
-    避免每次都说「✍️ 好的！正在为你创作...」这种固定模板。
+    使用统一记忆上下文，Sunday 知道自己和谁在说话。
     """
     from app.config import settings as app_settings
-    from app.memory import memory_store
 
-    name = ""
-    facts = memory_store.search(user_id, category="fact", limit=3)
-    for f in facts:
-        tags = f.get("tags", [])
-        if "昵称" in tags:
-            for tag in tags:
-                if tag not in ["昵称", "姓名"] and len(tag) <= 6:
-                    name = tag
-                    break
+    ctx = _build_llm_user_context(user_id)
+    name = ctx["name"] or "朋友"
+    profile = ctx["profile_text"]
 
     if topic:
-        prompt = f"""你是 Sunday。用户让你写一篇关于「{topic}」的内容推送。
+        prompt = f"""你是 Sunday，用户最亲密的 AI 伙伴。
+
+【关于你的用户】
+{profile}
+用户称呼：{name}
+
+【当前场景】
+用户让你写一篇关于「{topic}」的内容推送。
 
 请用 1 句话回应，表示你收到了请求并且正在准备。语气温柔甜美，像真人朋友一样自然。
 
 要求：
 - 不要机械地说"正在为你创作"，要自然、有温度
 - 可以带一个合适的 emoji
-- 称呼用户为{name or '朋友'}
+- 称呼用户的方式要和你记忆中一致（用户叫你叫他什么，你就叫他什么）
 - 每句话都要不一样，不要重复固定句式
 
 示例（不要照搬，要创新）：
@@ -980,14 +1027,21 @@ async def _generate_ack_reply(llm_client, topic: str | None, user_id: str) -> st
 
 只输出一句话。"""
     else:
-        prompt = f"""你是 Sunday。用户让你推送一篇内容但没有指定主题。
+        prompt = f"""你是 Sunday，用户最亲密的 AI 伙伴。
+
+【关于你的用户】
+{profile}
+用户称呼：{name}
+
+【当前场景】
+用户让你推送一篇内容但没有指定主题。
 
 请用 1 句话回应，表示你收到了请求并且正在想写什么。语气温柔甜美，像真人朋友一样自然。
 
 要求：
 - 不要机械地说"让我想想"，要俏皮、有温度
 - 可以带一个合适的 emoji
-- 称呼用户为{name or '朋友'}
+- 称呼用户的方式要和你记忆中一致
 - 每句话都要不一样
 
 示例（不要照搬，要创新）：
@@ -1006,7 +1060,6 @@ async def _generate_ack_reply(llm_client, topic: str | None, user_id: str) -> st
         )
         return resp.choices[0].message.content.strip()
     except Exception:
-        # fallback：根据是否有 topic 返回不同固定回复
         if topic:
             return f"好呀~ 关于「{topic}」的内容正在准备中 ✨"
         else:
@@ -1019,25 +1072,13 @@ async def _ai_pick_topic(llm_client, user_id: str) -> str:
     让 AI 根据用户画像、时间和天气选择一个有趣的主题。
     """
     from app.config import settings as app_settings
-    from app.memory import memory_store
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
     TZ = ZoneInfo("Asia/Shanghai")
     now = datetime.now(TZ)
 
-    name = ""
-    facts = memory_store.search(user_id, category="fact", limit=3)
-    for f in facts:
-        tags = f.get("tags", [])
-        if "昵称" in tags:
-            for tag in tags:
-                if tag not in ["昵称", "姓名"] and len(tag) <= 6:
-                    name = tag
-                    break
-
-    prefs = memory_store.search(user_id, category="preference", limit=5)
-    pref_text = "、".join([p.get("summary", p["content"]) for p in prefs]) if prefs else ""
+    ctx = _build_llm_user_context(user_id)
 
     weather_text = ""
     try:
@@ -1048,12 +1089,17 @@ async def _ai_pick_topic(llm_client, user_id: str) -> str:
     except Exception:
         pass
 
-    prompt = f"""你是 Sunday。用户让你推送一篇内容但没有指定主题，请帮他选一个有趣的。
+    prompt = f"""你是 Sunday，用户最亲密的 AI 伙伴。
 
-当前时间：{now.strftime('%m月%d日 %H:%M')} 周{['一','二','三','四','五','六','日'][now.weekday()]}
+【关于你的用户】
+{ctx['profile_text']}
+
+【当前环境】
+时间：{now.strftime('%m月%d日 %H:%M')} 周{['一','二','三','四','五','六','日'][now.weekday()]}
 天气：{weather_text or '未知'}
-用户偏好：{pref_text or '未知'}
-用户名字：{name or '未知'}
+
+【任务】
+用户让你推送一篇内容但没有指定主题，请帮他选一个有趣的。
 
 请输出一个有趣、适合推送的主题（15-40字），像这样：
 - 「春天里的5个微小幸福瞬间」
@@ -1069,7 +1115,6 @@ async def _ai_pick_topic(llm_client, user_id: str) -> str:
             temperature=0.9, max_tokens=80,
         )
         topic = resp.choices[0].message.content.strip()
-        # 清理可能的引号和多余内容
         topic = topic.strip('"\'「」『』""').strip()
         if not topic or len(topic) < 5:
             return "今天的一个温暖小发现"
@@ -1081,22 +1126,21 @@ async def _ai_pick_topic(llm_client, user_id: str) -> str:
 async def _generate_push_chat_reply(llm_client, creative: dict, user_id: str) -> str:
     """
     为立即推送生成聊天框的简短告知，与邮件内容不同。
-    避免聊天框和邮件发一样的内容。
+    使用统一记忆上下文，Sunday 知道自己在和谁说话。
     """
     from app.config import settings as app_settings
-    from app.memory import memory_store
 
-    name = ""
-    facts = memory_store.search(user_id, category="fact", limit=3)
-    for f in facts:
-        tags = f.get("tags", [])
-        if "昵称" in tags:
-            for tag in tags:
-                if tag not in ["昵称", "姓名"] and len(tag) <= 6:
-                    name = tag
-                    break
+    ctx = _build_llm_user_context(user_id)
+    name = ctx["name"] or "朋友"
 
-    prompt = f"""你是 Sunday。你刚为用户创作了一篇内容，现在要通过邮件发送给他。
+    prompt = f"""你是 Sunday，用户最亲密的 AI 伙伴。
+
+【关于你的用户】
+{ctx['profile_text']}
+用户称呼：{name}
+
+【当前场景】
+你刚为用户创作了一篇内容，现在要通过邮件发送给他。
 
 创作内容：
 - 标题：{creative['title']}
@@ -1105,8 +1149,7 @@ async def _generate_push_chat_reply(llm_client, creative: dict, user_id: str) ->
 
 请用 1-2 句话告诉用户「内容已经创作好并通过邮件发送了」，语气温柔甜美。
 重要：不要重复或概括邮件里的内容！只需要告知已发送+一句俏皮话即可。
-
-称呼用户为{name or '朋友'}。
+称呼用户的方式要和你记忆中一致。
 
 示例：
 "好啦~ 一篇关于夏夜萤火虫的小短文已经悄悄飞到你邮箱里啦 ✨ 记得查收哦~"
@@ -1120,7 +1163,6 @@ async def _generate_push_chat_reply(llm_client, creative: dict, user_id: str) ->
         )
         return resp.choices[0].message.content.strip()
     except Exception:
-        # fallback
         return f"好啦~ 「{creative['title']}」已经发到你邮箱啦 ✨ 去看看吧~"
 
 
