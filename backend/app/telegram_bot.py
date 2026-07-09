@@ -353,11 +353,19 @@ async def _ai_detect_intent(message_text: str, user_id: str) -> dict | None:
 {{
   "has_intent": true/false,
   "intent_type": "report" | "creative_push" | "email_send" | "chart" | "none",
-  "topic": "提取的核心主题（具体是什么内容，10-40字）",
+  "topic": "提取的核心主题（只提取内容主题，去掉动作描述，10-30字）",
   "style": "academic" | "brief" | "creative" | "auto",
   "send_email": true/false,
   "explanation": "一句话解释"
 }}
+
+【topic 提取规则（极其重要）】
+- 只提取「内容主题」，不要包含动作描述
+- 错误："创作一篇夏日随笔并进行推送" → 正确："夏日随笔"
+- 错误："写一篇关于量子计算的文章" → 正确："量子计算"
+- 错误："推送一篇关于科技和小知识的邮件" → 正确："科技和小知识"
+- 错误："生成一份关于AI发展的报告" → 正确："AI发展"
+- 如果用户没有明确主题（如"推送一封给我"），topic 留空或填""
 
 意图说明：
 - "report": 用户想要生成正式文档/报告（明确说"报告/文档/word/论文/总结"）
@@ -374,14 +382,14 @@ async def _ai_detect_intent(message_text: str, user_id: str) -> dict | None:
 
 关键判断规则：
 1. 「推送一篇关于XX的邮件给我」→ creative_push（用户要你创作内容并推送，不是发送已有文件）
-2. 「推送一封给我吧」→ creative_push（topic可以填"有趣的话题"，让Sunday自由发挥）
+2. 「推送一封给我吧」→ creative_push（topic为空，让Sunday自由发挥）
 3. 「那现在推送一封给我吧」→ creative_push（同上，让Sunday自己选主题）
 4. 「用邮件发给我」前面如果有创作请求→ creative_push（不是email_send）
 5. 「写个情书/小作文」且没提word → none（正常聊天，不是推送）
 6. 用户明确说"写/创作/生成/做一篇XX"且提到邮件/推送 → creative_push
 7. email_send 只在用户想把已有文件/内容用邮件发送时才用
 
-输出JSON。"""
+只输出JSON，不要任何解释。"""
     try:
         resp = await llm_service.client.chat.completions.create(
             model=app_settings.llm_model,
@@ -461,14 +469,19 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # 如果 topic 为空或太模糊（如"推送内容"、"来一封"等），让 AI 自己选主题
         vague_topics = ["推送内容", "推送", "内容", "来一封", "一篇", "邮件", "消息", ""]
         if not topic or topic.strip() in vague_topics or len(topic.strip()) < 3:
-            # topic 太模糊 → 让 AI 在创作时自己决定主题
             actual_topic = None
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-            await update.message.reply_text("✍️ 好的！让我想想给你写点什么有趣的内容~")
         else:
             actual_topic = topic
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-            await update.message.reply_text(f"✍️ 好的！正在为你创作「{topic}」...")
+
+        # ── 让 AI 生成多样化的「正在创作」回复 ──
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+        
+        # 根据是否有具体主题，生成不同的回复
+        if actual_topic:
+            ack_reply = await _generate_ack_reply(llm_service.client, actual_topic, user_id)
+        else:
+            ack_reply = await _generate_ack_reply(llm_service.client, None, user_id)
+        await update.message.reply_text(ack_reply)
 
         try:
             from app.main import llm_service
@@ -927,6 +940,76 @@ async def _auto_check_plan_done(message: str, user_id: str, update: Update):
                         return
     except Exception:
         pass  # 静默失败，不影响聊天
+
+
+async def _generate_ack_reply(llm_client, topic: str | None, user_id: str) -> str:
+    """
+    让 AI 生成多样化的「正在创作」告知语。
+    避免每次都说「✍️ 好的！正在为你创作...」这种固定模板。
+    """
+    from app.config import settings as app_settings
+    from app.memory import memory_store
+
+    name = ""
+    facts = memory_store.search(user_id, category="fact", limit=3)
+    for f in facts:
+        tags = f.get("tags", [])
+        if "昵称" in tags:
+            for tag in tags:
+                if tag not in ["昵称", "姓名"] and len(tag) <= 6:
+                    name = tag
+                    break
+
+    if topic:
+        prompt = f"""你是 Sunday。用户让你写一篇关于「{topic}」的内容推送。
+
+请用 1 句话回应，表示你收到了请求并且正在准备。语气温柔甜美，像真人朋友一样自然。
+
+要求：
+- 不要机械地说"正在为你创作"，要自然、有温度
+- 可以带一个合适的 emoji
+- 称呼用户为{name or '朋友'}
+- 每句话都要不一样，不要重复固定句式
+
+示例（不要照搬，要创新）：
+"好呀~ 关于{topic}的小灵感正在冒泡呢 ✨ 稍等哦~"
+"收到！让我酝酿一下{topic}的内容 🌿 马上就好~"
+"{topic}嘛~ 这个主题好有意思，让我想想怎么写 💭"
+"来啦来啦！{topic}的灵感已经飞到我脑子里啦 🎈"
+
+只输出一句话。"""
+    else:
+        prompt = f"""你是 Sunday。用户让你推送一篇内容但没有指定主题。
+
+请用 1 句话回应，表示你收到了请求并且正在想写什么。语气温柔甜美，像真人朋友一样自然。
+
+要求：
+- 不要机械地说"让我想想"，要俏皮、有温度
+- 可以带一个合适的 emoji
+- 称呼用户为{name or '朋友'}
+- 每句话都要不一样
+
+示例（不要照搬，要创新）：
+"好呀~ 让我想想今天给你写点什么有趣的呢 ✨"
+"收到！让我翻翻灵感小本子，找点好东西给你 🌿"
+"推送来咯~ 让我找找今天最想分享什么 💭"
+"来啦！让我挑一个今天最有感觉的话题 🎈"
+
+只输出一句话。"""
+
+    try:
+        resp = await llm_client.chat.completions.create(
+            model=app_settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.95, max_tokens=80,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        # fallback：根据是否有 topic 返回不同固定回复
+        if topic:
+            return f"好呀~ 关于「{topic}」的内容正在准备中 ✨"
+        else:
+            return "好呀~ 让我想想给你写点什么有趣的内容 ✨"
 
 
 async def _ai_pick_topic(llm_client, user_id: str) -> str:
