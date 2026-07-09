@@ -3,6 +3,7 @@ SundayOS Telegram Bot 模块
 Sunday 在 Telegram 上跟你像朋友一样聊天 💕
 """
 import asyncio
+import json
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -16,7 +17,6 @@ from app.memory import memory_store, get_db
 from app.mailer import send_email
 from app.logger import log
 
-logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 TZ = ZoneInfo("Asia/Shanghai")
 
