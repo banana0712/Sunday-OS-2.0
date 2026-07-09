@@ -109,7 +109,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"🎤 [VOICE] 音频 URL: {audio_url}")
 
         # 3. ASR 转文字（异步：提交 + 轮询）
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
         text = await voice_service.transcribe(audio_url, audio_format="ogg")
         print(f"🎤 [VOICE] ASR 结果: '{text[:100] if text else '(空)'}'")
 
@@ -142,11 +142,11 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             audio_reply = await voice_service.synthesize(reply, emotion="sweet")
             import io
             voice_file = io.BytesIO(audio_reply)
-            voice_file.name = "reply.mp3"  # 必须设置文件名，Telegram 才能识别格式和时长
+            voice_file.name = "reply.mp3"
             await context.bot.send_voice(
                 chat_id=chat_id,
                 voice=voice_file,
-                caption="🎙️ 语音版来啦~"
+                caption=""  # 不显示任何文字，纯语音
             )
         except Exception as tts_e:
             print(f"🎤 [VOICE] TTS 失败: {tts_e}")
