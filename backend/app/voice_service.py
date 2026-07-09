@@ -12,7 +12,7 @@ import gzip
 import struct
 import uuid
 import logging
-import requests
+import httpx
 import websockets
 
 logger = logging.getLogger(__name__)
@@ -259,15 +259,13 @@ class VoiceService:
             "X-Api-Resource-Id": self.tts_resource_id,
         }
 
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.post(DOUBAO_TTS_URL, headers=headers, json=payload, timeout=30)
-        )
-        response.raise_for_status()
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(DOUBAO_TTS_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            body = response.text
 
         audio_chunks = []
-        for line in response.text.split("\n"):
+        for line in body.split("\n"):
             line = line.strip()
             if not line:
                 continue
