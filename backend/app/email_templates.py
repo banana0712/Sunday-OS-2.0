@@ -256,6 +256,125 @@ async def ai_design(
 
 
 # ============================================================
+# 🎨 AI 完整邮件生成（对标精美商业邮件）
+# ============================================================
+
+async def ai_render_email(
+    llm_client,
+    user_id: str,
+    template_type: str,
+    name: str = "",
+    date_str: str = "",
+    weekday_str: str = "",
+    weather: dict = None,
+    content_blocks: list = None,
+    message: str = "",
+    topic: str = "",
+) -> str:
+    """
+    让 AI 直接生成完整 HTML 邮件，参考热门品牌邮件设计风格。
+
+    Returns:
+        完整的 HTML 邮件字符串
+    """
+    from app.config import settings as app_settings
+
+    now = datetime.now(TZ)
+    if not date_str:
+        date_str = now.strftime("%Y年%m月%d日")
+        weekday_str = f"周{['一','二','三','四','五','六','日'][now.weekday()]}"
+
+    weather_text = ""
+    if weather:
+        weather_text = f"{weather.get('desc_cn','')} {weather.get('temp','')}°C"
+
+    # 构建内容描述
+    content_desc = ""
+    if content_blocks:
+        for i, block in enumerate(content_blocks):
+            if isinstance(block, dict):
+                content_desc += f"- {block.get('label','')}: {block.get('value','')}\n"
+            else:
+                content_desc += f"- {str(block)[:200]}\n"
+    if message:
+        content_desc += f"\n正文：{message[:500]}\n"
+
+    type_names = {
+        "morning": "早安手报", "weekly": "周报总结", "fortune": "心情签",
+        "knowledge": "知识卡片", "creative": "创意推送", "simple": "问候卡片",
+    }
+    type_name = type_names.get(template_type, "邮件")
+
+    prompt = f"""你是一位世界级邮件设计师。请为 Sunday（一个甜美可爱的 AI 助手）设计一封精美的 HTML 邮件。
+
+【邮件信息】
+- 类型：{type_name}
+- 收件人：{name or '朋友'}
+- 时间：{date_str} {weekday_str}
+- 天气：{weather_text or '未知'}
+- 主题：{topic or type_name}
+- 内容：
+{content_desc or '一封温馨的问候邮件'}
+
+【设计风格要求】
+从以下风格中选一个最合适的，并在邮件中体现：
+1. Apple 风 — 极简大留白、渐变背景、大字号标题、SF 风格排版、大量呼吸空间
+2. Notion 风 — 温暖手绘感、柔和 emoji、卡片式布局、圆角、温馨配色
+3. 日系杂志风 — 清新治愈、大量留白、淡雅配色、和风元素、精致排版
+4. 现代极简风 — 黑白灰主调、一个强调色、几何线条、高级感
+
+【技术要求】
+- 纯 HTML + 内联 CSS（兼容所有邮件客户端）
+- 最大宽度 500px，居中显示
+- 必须包含：Hero 区域（标题+日期+氛围）、内容区域（卡片）、底部 CTA
+- 使用 CSS gradient 做 hero 背景
+- 圆角、box-shadow 营造层次感
+- 至少 3 个视觉层次（hero > 卡片 > 辅助信息）
+- 用 emoji 作为视觉锚点，不要滥用
+- 配色干净、有品味，不要太花哨
+- padding 要充足，有呼吸感
+- 字体：system-ui, -apple-system 等系统字体栈
+
+【输出】
+只输出完整的 HTML 代码。不要任何解释、不要 markdown 代码块标记。"""
+
+    try:
+        resp = await llm_client.chat.completions.create(
+            model=app_settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.85,
+            max_tokens=2500,
+        )
+        html = resp.choices[0].message.content or ""
+
+        # 清理可能的 markdown 代码块
+        html = html.strip()
+        if html.startswith("```"):
+            html = html.split("\n", 1)[-1]
+            if html.endswith("```"):
+                html = html[:-3]
+            html = html.strip()
+
+        # 确保是完整 HTML
+        if "<html" not in html.lower() and "<body" not in html.lower():
+            # AI 可能只输出了 body 内容，包裹一下
+            html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;padding:0;">
+{html}
+</body>
+</html>"""
+
+        print(f"🎨 [AI-MAIL] 生成完成，{len(html)} 字符")
+        return html
+
+    except Exception as e:
+        print(f"🎨 [AI-MAIL] 生成失败: {e}")
+        return ""
+
+
+# ============================================================
 # 📧 各邮件模板（接收 palette + 数据 → HTML）
 # ============================================================
 

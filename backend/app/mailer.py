@@ -251,8 +251,9 @@ async def _build_creative_post(user_id: str, llm_client, decision: dict, now: da
 # ============================================================
 
 async def _build_morning_post(user_id: str, llm_client, now: datetime) -> str:
-    """构建早安手报 HTML — AI 设计 + 数据渲染"""
+    """构建早安手报 HTML — 优先 AI 生成，降级传统模板"""
     from app.memory import memory_store
+    from app.email_templates import ai_render_email, ai_design, render
 
     name = _get_user_name(user_id)
     weather = _get_weather()
@@ -269,14 +270,36 @@ async def _build_morning_post(user_id: str, llm_client, now: datetime) -> str:
     weekday_str = ["一", "二", "三", "四", "五", "六", "日"][now.weekday()]
     weekday_str = f"周{weekday_str}"
 
+    # 构建内容块
+    content_blocks = []
+    if weather:
+        content_blocks.append({"label": "天气", "value": f"{weather.get('desc_cn','')} {weather.get('temp','?')}°C"})
+    if schedule_items:
+        content_blocks.append({"label": "今日行程", "value": "、".join(schedule_items[:3])})
+    if highlight:
+        content_blocks.append({"label": "记忆亮点", "value": highlight})
+
+    # 优先尝试 AI 生成
+    try:
+        html = await ai_render_email(
+            llm_client, user_id, "morning",
+            name=name, date_str=date_str, weekday_str=weekday_str,
+            weather=weather, content_blocks=content_blocks, message=message,
+            topic="早安手报",
+        )
+        if html and len(html) > 200:
+            return html
+    except Exception as e:
+        print(f"🎨 AI 邮件生成失败，降级传统模板: {e}")
+
+    # 降级：传统模板
     weather_text = f"{weather.get('desc_cn','')} {weather.get('temp','?')}°C" if weather else ""
     prefs_text = "、".join([p.get("summary", p["content"]) for p in prefs]) if prefs else ""
 
-    # AI 设计决策
     palette = await ai_design(llm_client, user_id, "morning", {
         "name": name, "date_str": date_str, "weekday_str": weekday_str,
         "weather_text": weather_text, "prefs_text": prefs_text,
-        "type_description": "早安问候手报，包含天气、行程和暖心问候，像一份清晨小报纸",
+        "type_description": "早安问候手报",
     })
 
     return render("morning",
@@ -390,14 +413,38 @@ async def _build_weekly_report(user_id: str, llm_client, now: datetime) -> str:
     week_start = (now - timedelta(days=7)).strftime("%m.%d")
     week_end = now.strftime("%m.%d")
     week_range = f"{week_start} - {week_end}"
-
-    # AI 设计决策
     name = _get_user_name(user_id)
+
+    # 优先尝试 AI 生成
+    try:
+        from app.email_templates import ai_render_email
+        content_blocks = [
+            {"label": "本周对话", "value": f"{chat_count} 条"},
+            {"label": "新增记忆", "value": f"{len(recent_mems)} 条（共 {total_mems} 条）"},
+            {"label": "关键词", "value": "、".join(keywords[:5]) if keywords else "无"},
+        ]
+        if top_mems:
+            content_blocks.append({"label": "记忆亮点", "value": "；".join(top_mems[:3])})
+        if reflection:
+            content_blocks.append({"label": "Sunday 的感想", "value": reflection[:200]})
+
+        html = await ai_render_email(
+            llm_client, user_id, "weekly",
+            name=name, date_str=now.strftime("%Y年%m月%d日"),
+            weekday_str=f"周{['一','二','三','四','五','六','日'][now.weekday()]}",
+            content_blocks=content_blocks, topic=f"周报 · {week_range}",
+        )
+        if html and len(html) > 200:
+            return html
+    except Exception as e:
+        print(f"🎨 AI 周报生成失败，降级: {e}")
+
+    # 降级：传统模板
     palette = await ai_design(llm_client, user_id, "weekly", {
         "name": name, "date_str": now.strftime("%Y年%m月%d日"),
         "weekday_str": f"周{['一','二','三','四','五','六','日'][now.weekday()]}",
         "weather_text": "", "prefs_text": "",
-        "type_description": "一周数据回顾报告，包含对话统计、记忆回顾和AI感想，专业而温暖",
+        "type_description": "一周数据回顾报告",
     })
 
     return render("weekly",
