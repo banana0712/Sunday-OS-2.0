@@ -66,15 +66,28 @@ class VoiceService:
 
     async def transcribe(self, audio_data: bytes, audio_format: str = "ogg") -> str:
         """
-        语音转文字（流式识别）。
+        语音转文字（流式识别）。30s 超时兜底，避免 WebSocket 挂死导致无响应。
 
         Args:
             audio_data: 原始音频数据（ogg/mp3/wav/pcm）
             audio_format: 音频格式（pcm 时直接发送，其他格式先转码）
 
         Returns:
-            识别的文字
+            识别的文字（可能为空字符串）
         """
+        try:
+            return await asyncio.wait_for(
+                self._transcribe_inner(audio_data, audio_format),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            logger.error("ASR 转写超时（30s）")
+            return ""
+        except Exception as e:
+            logger.error(f"ASR WebSocket 错误: {e}")
+            return ""
+
+    async def _transcribe_inner(self, audio_data: bytes, audio_format: str) -> str:
         # 非 PCM 格式先转码
         if audio_format != "pcm":
             audio_data = await self._convert_to_pcm(audio_data, audio_format)
@@ -89,52 +102,53 @@ class VoiceService:
         }
 
         results = []
-        try:
-            async with websockets.connect(DOUBAO_ASR_WS_URL, additional_headers=headers) as ws:
-                # 发送首包（Full Client Request）
-                first_request = json.dumps({
-                    "user": {"uid": "sundayos"},
-                    "audio": {
-                        "format": "pcm",
-                        "rate": 16000,
-                        "bits": 16,
-                        "channel": 1,
-                        "language": "zh-CN",
-                    },
-                    "request": {
-                        "model_name": "bigmodel",
-                        "enable_itn": True,
-                        "enable_punc": True,
-                    }
-                })
-                await self._send_frame(ws, MSG_FULL_REQUEST, first_request.encode())
+        async with websockets.connect(
+            DOUBAO_ASR_WS_URL,
+            additional_headers=headers,
+            open_timeout=10,
+            close_timeout=3,
+        ) as ws:
+            # 发送首包（Full Client Request）
+            first_request = json.dumps({
+                "user": {"uid": "sundayos"},
+                "audio": {
+                    "format": "pcm",
+                    "rate": 16000,
+                    "bits": 16,
+                    "channel": 1,
+                    "language": "zh-CN",
+                },
+                "request": {
+                    "model_name": "bigmodel",
+                    "enable_itn": True,
+                    "enable_punc": True,
+                }
+            })
+            await self._send_frame(ws, MSG_FULL_REQUEST, first_request.encode())
 
-                # 分片发送音频（每 200ms 一包 ≈ 6400 bytes）
-                chunk_size = 6400
-                for i in range(0, len(audio_data), chunk_size):
-                    chunk = audio_data[i:i + chunk_size]
-                    await self._send_frame(ws, MSG_AUDIO_ONLY, chunk)
-                    # 非阻塞尝试接收中间结果
-                    try:
-                        result = await asyncio.wait_for(ws.recv(), timeout=0.05)
-                        text = self._parse_response(result)
-                        if text:
-                            results.append(text)
-                    except asyncio.TimeoutError:
-                        pass
-
-                # 等待最终结果
+            # 分片发送音频（每 200ms 一包 ≈ 6400 bytes）
+            chunk_size = 6400
+            for i in range(0, len(audio_data), chunk_size):
+                chunk = audio_data[i:i + chunk_size]
+                await self._send_frame(ws, MSG_AUDIO_ONLY, chunk)
+                # 非阻塞尝试接收中间结果
                 try:
-                    while True:
-                        result = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                        text = self._parse_response(result)
-                        if text:
-                            results.append(text)
+                    result = await asyncio.wait_for(ws.recv(), timeout=0.05)
+                    text = self._parse_response(result)
+                    if text:
+                        results.append(text)
                 except asyncio.TimeoutError:
                     pass
-        except Exception as e:
-            logger.error(f"ASR WebSocket 错误: {e}")
-            raise
+
+            # 等待最终结果
+            try:
+                while True:
+                    result = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                    text = self._parse_response(result)
+                    if text:
+                        results.append(text)
+            except asyncio.TimeoutError:
+                pass
 
         return results[-1] if results else ""
 

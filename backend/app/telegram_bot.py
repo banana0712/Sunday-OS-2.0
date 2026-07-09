@@ -57,6 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理语音消息：下载 → ASR 转文字 → LLM 回复 → TTS 合成语音 → 发送"""
     from app.voice_service import voice_service, EMOTION_PROMPTS
+    import traceback as _traceback
 
     user_id = _get_user_id(update)
     chat_id = update.effective_chat.id
@@ -81,7 +82,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         audio_bytes = await file.download_as_bytearray()
         audio_data = bytes(audio_bytes)
 
-        print(f"🤖 收到语音消息: {len(audio_data)} bytes")
+        logger.info(f"收到语音消息: user={user_id} size={len(audio_data)}bytes")
 
         # 2. ASR 转文字
         text = await voice_service.transcribe(audio_data, audio_format="ogg")
@@ -89,7 +90,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("嗯？刚才没听清呢，再说一次好不好~ 🥺")
             return
 
-        print(f"🤖 ASR 识别结果: {text[:50]}")
+        logger.info(f"ASR 识别结果: {text[:80]}")
 
         # 3. 记录到对话流（带标记）
         memory_store.add_conversation(user_id, "user", f"[语音] {text}")
@@ -99,6 +100,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         reply = await _process_message_text(text, user_id, update, context)
 
         if not reply:
+            await update.message.reply_text("嗯... 刚才想说什么来着~ 🥺")
             return
 
         # 5. 发送"正在说话"状态
@@ -115,9 +117,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 caption="🎙️ 语音版来啦~"
             )
         except Exception as tts_e:
-            logger.error(f"TTS 合成失败: {tts_e}")
+            logger.error(f"TTS 合成失败: {tts_e}\n{_traceback.format_exc()}")
             # 降级为文字回复
             await _send_smart_reply(update, reply)
+            _record_voice_usage(user_id)
             return
 
         # 7. 同时发送文字版（可选，方便用户阅读）
@@ -128,8 +131,13 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         _record_voice_usage(user_id)
 
     except Exception as e:
-        logger.error(f"语音消息处理失败: {e}")
-        await update.message.reply_text("唔... 语音处理出了点小问题，打字跟我说好不好？🥺")
+        tb = _traceback.format_exc()
+        logger.error(f"语音消息处理失败: {e}\n{tb}")
+        log("error", user_id, "telegram", f"语音处理失败: {str(e)[:200]}")
+        try:
+            await update.message.reply_text("唔... 语音处理出了点小问题，打字跟我说好不好？🥺")
+        except Exception:
+            pass  # 如果连 reply_text 都发不了就算了
 
 
 async def _check_voice_quota(user_id: str) -> bool:
