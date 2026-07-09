@@ -141,9 +141,11 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             audio_reply = await voice_service.synthesize(reply, emotion="sweet")
             import io
+            voice_file = io.BytesIO(audio_reply)
+            voice_file.name = "reply.mp3"  # 必须设置文件名，Telegram 才能识别格式和时长
             await context.bot.send_voice(
                 chat_id=chat_id,
-                voice=io.BytesIO(audio_reply),
+                voice=voice_file,
                 caption="🎙️ 语音版来啦~"
             )
         except Exception as tts_e:
