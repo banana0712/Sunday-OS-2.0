@@ -142,11 +142,24 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
         try:
             # 检测唱歌请求
-            sing_keywords = ["唱歌", "唱一首", "唱个歌", "唱支歌", "唱什么", "唱一个", "来一首", "来一个", "唱来听听"]
+            sing_keywords = ["唱歌", "唱一首", "唱个歌", "唱支歌", "唱什么", "唱一个", "来一���", "来一个", "唱来听听"]
             is_singing = any(kw in text for kw in sing_keywords)
+
             if is_singing:
-                print(f"🎤 [VOICE] 检测到唱歌请求，使用 singing 模式")
-                audio_reply = await voice_service.synthesize_singing(reply)
+                print(f"🎵 [MUSIC] 检测到唱歌请求，使用 MiniMax Music API")
+                # 从回复中提取歌词（LLM 应该生成了歌词）
+                # 清理括号动作描述，保留纯歌词
+                import re
+                lyrics = re.sub(r'[（(].*?[）)]', '', reply)
+                lyrics = lyrics.strip()
+                # 用换行符分隔（LLM 应该用换行表示每句）
+                if '\n' not in lyrics:
+                    lyrics = lyrics.replace('。', '。\n').replace('！', '！\n').replace('？', '？\n')
+                audio_reply = await voice_service.generate_music(
+                    lyrics=lyrics,
+                    style="甜美可爱的女声，轻快J-Pop风格，像动漫主题曲，温柔甜美"
+                )
+                print(f"🎵 [MUSIC] 歌曲生成完成，发送中...")
             else:
                 audio_reply = await voice_service.synthesize(reply, emotion="sweet")
 
@@ -156,11 +169,11 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await context.bot.send_voice(
                 chat_id=chat_id,
                 voice=voice_file,
-                caption=""  # 不显示任何文字，纯语音
+                caption=""
             )
         except Exception as tts_e:
-            print(f"🎤 [VOICE] TTS 失败: {tts_e}")
-            logger.error(f"TTS 合成失败: {tts_e}\n{_traceback.format_exc()}")
+            print(f"🎤 [VOICE] TTS/Music 失败: {tts_e}")
+            logger.error(f"TTS/Music 失败: {tts_e}\n{_traceback.format_exc()}")
             # 降级为文字回复
             await _send_smart_reply(update, reply)
             _record_voice_usage(user_id)

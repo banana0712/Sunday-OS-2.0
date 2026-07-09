@@ -1,8 +1,8 @@
 """
-SundayOS 语音服务 v2 — 豆包异步 ASR + TTS（新版控制台鉴权）
-- ASR：异步 HTTP（submit + 轮询 query），适合长音频
+SundayOS 语音服务 v2 — 豆包异步 ASR + TTS + MiniMax 音乐生成
+- ASR：异步 HTTP（submit + 轮询 query）
 - TTS：HTTP 流式合成（unidirectional）
-- 鉴权：新版控制台统一用 X-Api-Key（UUID 格式）
+- 唱歌：MiniMax Music API（music-2.6-free）
 """
 import os
 import json
@@ -13,6 +13,9 @@ import logging
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# MiniMax Music API
+MINIMAX_MUSIC_URL = "https://api.minimaxi.com/v1/music_generation"
 
 # ============================================================
 # 豆包 API 常量（异步 ASR + 流式 TTS）
@@ -44,6 +47,8 @@ class VoiceService:
         self.tts_speaker = os.environ.get(
             "DOUBAO_TTS_SPEAKER", "zh_female_vv_uranus_bigtts"
         )
+        # MiniMax Music API（唱歌）
+        self.minimax_api_key = os.environ.get("MINIMAX_API_KEY", "")
 
     def is_available(self) -> bool:
         """检查语音服务是否可用"""
@@ -265,6 +270,64 @@ class VoiceService:
             audio = await self._synthesize_chunk(chunk, context_text)
             audio_parts.append(audio)
         return b"".join(audio_parts)
+
+    # ========== MiniMax Music（真正的唱歌）==========
+
+    async def generate_music(self, lyrics: str, style: str = "甜美可爱的女声，轻快J-Pop") -> bytes:
+        """
+        调用 MiniMax Music API 生成真正的歌曲（带旋律）。
+        
+        Args:
+            lyrics: 歌词文本，用 \\n 分隔行
+            style: 音乐风格描述
+        
+        Returns:
+            MP3 音频 bytes
+        """
+        if not self.minimax_api_key:
+            raise RuntimeError("MiniMax API Key 未配置")
+
+        # 去掉括号里的动作描述
+        import re
+        lyrics = re.sub(r'[（(].*?[）)]', '', lyrics)
+        lyrics = lyrics.strip()
+
+        payload = {
+            "model": "music-2.6-free",
+            "prompt": style,
+            "lyrics": lyrics,
+            "audio_setting": {
+                "sample_rate": 44100,
+                "bitrate": 256000,
+                "format": "mp3",
+            },
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.minimax_api_key}",
+        }
+
+        print(f"🎵 [MUSIC] 生成歌曲: style={style[:50]}... lyrics_len={len(lyrics)}")
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(MINIMAX_MUSIC_URL, headers=headers, json=payload)
+            data = resp.json()
+
+        status = data.get("base_resp", {}).get("status_code")
+        msg = data.get("base_resp", {}).get("status_msg", "")
+
+        if status != 0:
+            raise RuntimeError(f"MiniMax Music 错误: code={status} msg={msg}")
+
+        audio_hex = data.get("data", {}).get("audio", "")
+        if not audio_hex:
+            raise RuntimeError("MiniMax Music 未返回音频数据")
+
+        duration = data.get("extra_info", {}).get("music_duration", 0)
+        print(f"🎵 [MUSIC] ✅ 生成成功！时长={duration}ms")
+
+        return bytes.fromhex(audio_hex)
 
     @staticmethod
     def split_for_tts(text: str, max_chars: int = 300) -> list[str]:

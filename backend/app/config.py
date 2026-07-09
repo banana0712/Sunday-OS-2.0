@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     voice_enabled: bool = Field(default=True, alias="VOICE_ENABLED")
     # 公网 URL（用于暴露语音文件给豆包 ASR 下载）
     public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
+    # MiniMax Music API（唱歌用）
+    minimax_api_key: str = Field(default="", alias="MINIMAX_API_KEY")
 
     class Config:
         env_file = ".env"
