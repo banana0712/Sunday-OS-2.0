@@ -24,7 +24,8 @@ FROM_EMAIL = "sunday@notifications.sundayos.app"
 TO_EMAIL = settings.push_email
 
 # ── 频率限制 ──
-MAX_DAILY_PUSHES = 5
+MAX_CREATIVE_PUSHES = 2  # AI 创意推送每天最多 2 次
+# 节奏型推送（早安/午间/晚间/周报/关怀）有自己的去重逻辑，不受此限制
 
 # ── 天气缓存 ──
 _weather_cache: dict = {"data": None, "fetched_at": None}
@@ -131,13 +132,14 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str | None,
     weekday = now.weekday()  # 0=周一, 6=周日
     is_weekend = weekday >= 5
 
-    # ── 频率保护 ──
-    daily_count = memory_store.get_daily_push_count(user_id)
-    if daily_count >= MAX_DAILY_PUSHES:
-        logger.info(f"今日推送已达上限({MAX_DAILY_PUSHES})，跳过")
-        return None, None, None
+    # ── 频率保护（仅针对 AI 创意推送）──
+    # 节奏型推送（早安/午间/晚间/周报/关怀）有自己的去重逻辑，不受此限制
+    creative_count = memory_store.get_daily_push_count(user_id, push_type="creative")
+    if creative_count >= 2:
+        logger.info(f"今日AI创意推送已达上限(2)，跳过")
+        # 注意：不直接 return！继续检查节奏型推送
 
-    # ── 1. 早安 / 心情签 ──
+    # ── 1. 早安 / 心情签（不受任何冷却限制，时间窗口内每天一次）──
     morning_start, morning_end = (7, 10) if is_weekend else (7, 9)
     if morning_start <= hour <= morning_end:
         last_morning = memory_store._get_last_push(user_id, "morning")
@@ -150,7 +152,7 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str | None,
                 html = await _build_morning_post(user_id, llm_client, now)
                 return "morning", html, f"☀️ Sunday 早安手报 · {now.strftime('%m.%d')}"
 
-    # ── 2. 周报（周日晚上）──
+    # ── 2. 周报（周日晚上，不受冷却限制）──
     if weekday == 6 and 21 <= hour <= 23:
         last_weekly = memory_store._get_last_push(user_id, "weekly")
         if not last_weekly or (now - last_weekly).days >= 6:
@@ -158,7 +160,7 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str | None,
             html = await _build_weekly_report(user_id, llm_client, now)
             return "weekly", html, f"📊 Sunday 周报 · {now.strftime('%m.%d')}"
 
-    # ── 3. 午间 ── 仅当上午有互动
+    # ── 3. 午间（仅当上午有互动，不受冷却限制）──
     if 12 <= hour <= 13:
         last_noon = memory_store._get_last_push(user_id, "noon")
         if not last_noon or last_noon.date() < now.date():
@@ -168,7 +170,7 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str | None,
                 html = await _build_simple_greeting(user_id, llm_client, "noon", now)
                 return "noon", html, "🍱 午安小憩~"
 
-    # ── 4. 晚间 ── 仅当下午有互动
+    # ── 4. 晚间（仅当下午有互动，不受冷却限制）──
     if 21 <= hour <= 23:
         last_evening = memory_store._get_last_push(user_id, "evening")
         if not last_evening or last_evening.date() < now.date():
@@ -178,7 +180,7 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str | None,
                 html = await _build_simple_greeting(user_id, llm_client, "evening", now)
                 return "evening", html, "🌙 晚安好梦~"
 
-    # ── 5. 久未互动 ──
+    # ── 5. 久未互动关怀（不受冷却限制）──
     last_chat = memory_store._get_last_interaction(user_id)
     if last_chat:
         gap_hours = (now - last_chat).total_seconds() / 3600
@@ -189,16 +191,16 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str | None,
                 html = await _build_simple_greeting(user_id, llm_client, "care", now)
                 return "care", html, "💕 想你了呢~"
 
-    # ── 6. AI 主动创作推送 ──
-    from app.knowledge_push import should_push_knowledge, creative_decision, generate_creative_content
-    kb_type = await should_push_knowledge(user_id, now)
-    if kb_type:
-        # AI 创意决策：要不要推？推什么？
-        decision = await creative_decision(llm_client, user_id, now)
-        if decision:
-            memory_store._record_push(user_id, "creative")
-            html, subject = await _build_creative_post(user_id, llm_client, decision, now)
-            return "creative", html, subject
+    # ── 6. AI 主动创作推送（受频率+冷却限制）──
+    if creative_count < 2:
+        from app.knowledge_push import should_push_knowledge, creative_decision, generate_creative_content
+        kb_type = await should_push_knowledge(user_id, now)
+        if kb_type:
+            decision = await creative_decision(llm_client, user_id, now)
+            if decision:
+                memory_store._record_push(user_id, "creative")
+                html, subject = await _build_creative_post(user_id, llm_client, decision, now)
+                return "creative", html, subject
 
     return None, None, None
 

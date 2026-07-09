@@ -137,8 +137,31 @@ async def generate_creative_content(llm_client, user_id: str, decision: dict) ->
     topic = decision.get("topic", "")
     vibe = decision.get("vibe", "温暖治愈")
 
+    # ── 智能搜索关键词优化 ──
+    # 如果 topic 太模糊（如"推送内容"），用 AI 重新提炼搜索关键词
+    search_query = topic
+    vague_patterns = ["推送内容", "推送", "内容", "来一封", "一篇", "消息", "有趣的话题"]
+    if topic.strip() in vague_patterns or len(topic.strip()) < 5:
+        # 让 AI 提炼一个更好的搜索关键词
+        try:
+            refine_prompt = f"""用户想推送一篇内容，但主题比较模糊。请根据当前时间和常识，提炼一个适合搜索的具体关键词（5-15字）。
+
+例如：现在是夏天 → "夏日生活小知识"；用户喜欢科技 → "最新科技趣闻"
+
+请只输出一个搜索关键词，不要引号和解释。"""
+            resp = await llm_client.chat.completions.create(
+                model=app_settings.llm_model,
+                messages=[{"role": "user", "content": refine_prompt}],
+                temperature=0.8, max_tokens=40,
+            )
+            search_query = resp.choices[0].message.content.strip().strip('"\'""').strip()
+            if not search_query or len(search_query) < 3:
+                search_query = topic
+        except Exception:
+            pass
+
     # 搜索相关资料
-    results = search_web(topic, max_results=5)
+    results = search_web(search_query, max_results=5)
     search_text = format_search_results(results)
 
     prompt = f"""你是 Sunday，一个有创作欲的 AI 女孩。请为用户写一篇{content_type}。
@@ -153,6 +176,7 @@ async def generate_creative_content(llm_client, user_id: str, decision: dict) ->
 - 可以有小标题、emoji点缀，但不要过度
 - 结尾可以加一句你的个人感受或思考
 - 语气温柔自然，像在给好朋友分享
+- **重要**：不要写关于「推送技术」「推送系统」「推送服务」的内容，你写的是一篇有趣的文章/分享，主题是「{topic}」
 
 直接输出内容正文。"""
 
@@ -164,7 +188,7 @@ async def generate_creative_content(llm_client, user_id: str, decision: dict) ->
     content = resp.choices[0].message.content.strip()
 
     # 标题：用 topic 或从内容提取
-    title = topic or content.split("\n")[0][:40]
+    title = topic if (topic and len(topic) > 5 and topic not in vague_patterns) else content.split("\n")[0][:40]
 
     # 保存到知识库
     from app.memory import memory_store

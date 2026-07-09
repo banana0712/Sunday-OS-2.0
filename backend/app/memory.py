@@ -723,14 +723,20 @@ class MemoryStore:
                 return None
         return None
 
-    def get_daily_push_count(self, user_id: str) -> int:
-        """获取今日已推送次数"""
+    def get_daily_push_count(self, user_id: str, push_type: str = None) -> int:
+        """获取今日已推送次数，可选按类型过滤"""
         conn = get_db()
         today = datetime.now(TZ).strftime("%Y-%m-%d")
-        row = conn.execute(
-            "SELECT COUNT(*) as cnt FROM push_log WHERE user_id = ? AND pushed_at >= ?",
-            (user_id, today),
-        ).fetchone()
+        if push_type:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM push_log WHERE user_id = ? AND push_type = ? AND pushed_at >= ?",
+                (user_id, push_type, today),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM push_log WHERE user_id = ? AND pushed_at >= ?",
+                (user_id, today),
+            ).fetchone()
         conn.close()
         return row["cnt"] if row else 0
 

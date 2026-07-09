@@ -353,7 +353,7 @@ async def _ai_detect_intent(message_text: str, user_id: str) -> dict | None:
 {{
   "has_intent": true/false,
   "intent_type": "report" | "creative_push" | "email_send" | "chart" | "none",
-  "topic": "提取的核心主题",
+  "topic": "提取的核心主题（具体是什么内容，10-40字）",
   "style": "academic" | "brief" | "creative" | "auto",
   "send_email": true/false,
   "explanation": "一句话解释"
@@ -361,17 +361,27 @@ async def _ai_detect_intent(message_text: str, user_id: str) -> dict | None:
 
 意图说明：
 - "report": 用户想要生成正式文档/报告（明确说"报告/文档/word/论文/总结"）
-- "creative_push": 用户想要你立即创作一篇内容推送（"写一篇XX/帮我创作/生成推送/写个小短文/做个手作报道"等），这是创作请求，不是正式报告
-- "email_send": 用户想把文件通过邮件发送
+- "creative_push": 用户想要你立即创作一篇内容并通过邮件发送。包括这些表达：
+    * "推送一篇关于XX的邮件给我"
+    * "推送一封给我吧" / "给我推一篇" / "来一封推送"
+    * "写一篇XX然后发邮件" / "创作一篇XX推给我"
+    * "帮我做一篇XX的推送" / "生成推送"
+    * "现在推送一篇XX给我"
+    * 任何「推送」+「邮件」的组合，或者要求你创作内容发送的请求
+- "email_send": 用户想把已有文件通过邮件发送（不是创作新内容）
 - "chart": 用户想要生成图表
 - "none": 普通聊天
 
-判断关键：
-- "帮我写一篇关于XX的文章/短文/推送" → creative_push（立即创作）
-- "用word形式/生成word/写报告" → report（正式文档）
-- "写个情书/小作文"且没提word → none（正常聊天）
-- 用户明确要求"写/创作/生成/做一篇XX"且不是正式文档 → creative_push"""
+关键判断规则：
+1. 「推送一篇关于XX的邮件给我」→ creative_push（用户要你创作内容并推送，不是发送已有文件）
+2. 「推送一封给我吧」→ creative_push（topic可以填"有趣的话题"，让Sunday自由发挥）
+3. 「那现在推送一封给我吧」→ creative_push（同上，让Sunday自己选主题）
+4. 「用邮件发给我」前面如果有创作请求→ creative_push（不是email_send）
+5. 「写个情书/小作文」且没提word → none（正常聊天，不是推送）
+6. 用户明确说"写/创作/生成/做一篇XX"且提到邮件/推送 → creative_push
+7. email_send 只在用户想把已有文件/内容用邮件发送时才用
 
+输出JSON。"""
     try:
         resp = await llm_service.client.chat.completions.create(
             model=app_settings.llm_model,
@@ -446,26 +456,37 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     elif intent_type == "creative_push":
         # 立即创作推送 — 聊天框简短告知，邮件发完整内容
-        if not topic:
-            await update.message.reply_text("嗯？你想让我写什么主题呀？告诉我嘛~")
-            return
-
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-        await update.message.reply_text(f"✍️ 好的！正在为你创作「{topic}」...")
+        
+        # ── 智能 topic 处理 ──
+        # 如果 topic 为空或太模糊（如"推送内容"、"来一封"等），让 AI 自己选主题
+        vague_topics = ["推送内容", "推送", "内容", "来一封", "一篇", "邮件", "消息", ""]
+        if not topic or topic.strip() in vague_topics or len(topic.strip()) < 3:
+            # topic 太模糊 → 让 AI 在创作时自己决定主题
+            actual_topic = None
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+            await update.message.reply_text("✍️ 好的！让我想想给你写点什么有趣的内容~")
+        else:
+            actual_topic = topic
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+            await update.message.reply_text(f"✍️ 好的！正在为你创作「{topic}」...")
 
         try:
             from app.main import llm_service
-            from app.knowledge_push import creative_decision, generate_creative_content
+            from app.knowledge_push import generate_creative_content
             from datetime import datetime
 
-            decision = {"content_type": "小短文", "topic": topic, "vibe": style if style != "auto" else "温暖治愈"}
+            # 如果 topic 为空，让 AI 智能选择一个有趣的主题
+            if actual_topic is None:
+                actual_topic = await _ai_pick_topic(llm_service.client, user_id)
+
+            decision = {"content_type": "小短文", "topic": actual_topic, "vibe": style if style != "auto" else "温暖治愈"}
             creative = await generate_creative_content(llm_service.client, user_id, decision)
 
-            # ── 关键修复：聊天框发一句简短的个性化告知，不发邮件内容 ──
+            # ── 聊天框发一句简短的个性化告知，不发邮件内容 ──
             chat_reply = await _generate_push_chat_reply(llm_service.client, creative, user_id)
             await update.message.reply_text(chat_reply)
 
-            # 邮件发送完整内容（使用内容标题作为邮件主题）
+            # 邮件发送完整内容
             from app.mailer import send_email
             from app.email_templates import ai_design, creative_post
             from app.file_generator import get_image_url
@@ -477,7 +498,6 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 "type_description": f"创意推送，内容是{creative['content_type']}，氛围{creative['vibe']}",
             })
 
-            # 尝试获取配图
             image_url = ""
             try:
                 image_url = get_image_url(creative['title'])
@@ -487,7 +507,6 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             html = creative_post(palette=palette, content_type=creative['content_type'],
                                  title=creative['title'], content=creative['content'],
                                  vibe=creative['vibe'], image_url=image_url)
-            # 使用内容标题作为邮件主题
             email_subject = creative['title'] if creative['title'] else f"✨ Sunday · {creative['content_type']}"
             send_email(subject=email_subject, html_body=html)
 
@@ -908,6 +927,71 @@ async def _auto_check_plan_done(message: str, user_id: str, update: Update):
                         return
     except Exception:
         pass  # 静默失败，不影响聊天
+
+
+async def _ai_pick_topic(llm_client, user_id: str) -> str:
+    """
+    当用户没有指定具体主题时（如「推送一封给我」），
+    让 AI 根据用户画像、时间和天气选择一个有趣的主题。
+    """
+    from app.config import settings as app_settings
+    from app.memory import memory_store
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    TZ = ZoneInfo("Asia/Shanghai")
+    now = datetime.now(TZ)
+
+    name = ""
+    facts = memory_store.search(user_id, category="fact", limit=3)
+    for f in facts:
+        tags = f.get("tags", [])
+        if "昵称" in tags:
+            for tag in tags:
+                if tag not in ["昵称", "姓名"] and len(tag) <= 6:
+                    name = tag
+                    break
+
+    prefs = memory_store.search(user_id, category="preference", limit=5)
+    pref_text = "、".join([p.get("summary", p["content"]) for p in prefs]) if prefs else ""
+
+    weather_text = ""
+    try:
+        import httpx
+        resp = httpx.get("https://wttr.in/Shanghai?format=%C+%t", timeout=5)
+        if resp.status_code == 200:
+            weather_text = resp.text.strip()
+    except Exception:
+        pass
+
+    prompt = f"""你是 Sunday。用户让你推送一篇内容但没有指定主题，请帮他选一个有趣的。
+
+当前时间：{now.strftime('%m月%d日 %H:%M')} 周{['一','二','三','四','五','六','日'][now.weekday()]}
+天气：{weather_text or '未知'}
+用户偏好：{pref_text or '未知'}
+用户名字：{name or '未知'}
+
+请输出一个有趣、适合推送的主题（15-40字），像这样：
+- 「春天里的5个微小幸福瞬间」
+- 「今天发现的一个冷门科技小知识」
+- 「手作分享：如何用咖啡渣做香薰蜡烛」
+
+只输出主题文字，不要引号、不要解释。主题要具体、有趣、和用户相关。"""
+
+    try:
+        resp = await llm_client.chat.completions.create(
+            model=app_settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9, max_tokens=80,
+        )
+        topic = resp.choices[0].message.content.strip()
+        # 清理可能的引号和多余内容
+        topic = topic.strip('"\'「」『』""').strip()
+        if not topic or len(topic) < 5:
+            return "今天的一个温暖小发现"
+        return topic
+    except Exception:
+        return "今天的一个温暖小发现"
 
 
 async def _generate_push_chat_reply(llm_client, creative: dict, user_id: str) -> str:
