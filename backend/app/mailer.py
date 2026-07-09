@@ -111,10 +111,10 @@ def send_email(subject: str, html_body: str, to_email: str = None, attachments: 
 # Sunday 主动发言决策引擎 v4 — 智能模板选择
 # ============================================================
 
-async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str, str] | tuple[None, None]:
+async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str | None, str | None, str | None]:
     """
     Sunday 决定现在是否要主动发消息。
-    返回 (template_type, html_body) 或 (None, None)
+    返回 (template_type, html_body, subject) 或 (None, None, None)
 
     模板选择逻辑：
     - 周一~周五 7-9点 → 早安手报 ☀️
@@ -135,7 +135,7 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str, str] |
     daily_count = memory_store.get_daily_push_count(user_id)
     if daily_count >= MAX_DAILY_PUSHES:
         logger.info(f"今日推送已达上限({MAX_DAILY_PUSHES})，跳过")
-        return None, None
+        return None, None, None
 
     # ── 1. 早安 / 心情签 ──
     morning_start, morning_end = (7, 10) if is_weekend else (7, 9)
@@ -144,16 +144,19 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str, str] |
         if not last_morning or last_morning.date() < now.date():
             memory_store._record_push(user_id, "morning")
             if is_weekend:
-                return "fortune", await _build_fortune_post(user_id, llm_client, now)
+                html = await _build_fortune_post(user_id, llm_client, now)
+                return "fortune", html, "🥠 Sunday 今日心情签"
             else:
-                return "morning", await _build_morning_post(user_id, llm_client, now)
+                html = await _build_morning_post(user_id, llm_client, now)
+                return "morning", html, f"☀️ Sunday 早安手报 · {now.strftime('%m.%d')}"
 
     # ── 2. 周报（周日晚上）──
     if weekday == 6 and 21 <= hour <= 23:
         last_weekly = memory_store._get_last_push(user_id, "weekly")
         if not last_weekly or (now - last_weekly).days >= 6:
             memory_store._record_push(user_id, "weekly")
-            return "weekly", await _build_weekly_report(user_id, llm_client, now)
+            html = await _build_weekly_report(user_id, llm_client, now)
+            return "weekly", html, f"📊 Sunday 周报 · {now.strftime('%m.%d')}"
 
     # ── 3. 午间 ── 仅当上午有互动
     if 12 <= hour <= 13:
@@ -162,7 +165,8 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str, str] |
             last_chat = memory_store._get_last_interaction(user_id)
             if last_chat and last_chat.date() == now.date() and last_chat.hour < 12:
                 memory_store._record_push(user_id, "noon")
-                return "noon", await _build_simple_greeting(user_id, llm_client, "noon", now)
+                html = await _build_simple_greeting(user_id, llm_client, "noon", now)
+                return "noon", html, "🍱 午安小憩~"
 
     # ── 4. 晚间 ── 仅当下午有互动
     if 21 <= hour <= 23:
@@ -171,7 +175,8 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str, str] |
             last_chat = memory_store._get_last_interaction(user_id)
             if last_chat and last_chat.date() == now.date() and last_chat.hour >= 12:
                 memory_store._record_push(user_id, "evening")
-                return "evening", await _build_simple_greeting(user_id, llm_client, "evening", now)
+                html = await _build_simple_greeting(user_id, llm_client, "evening", now)
+                return "evening", html, "🌙 晚安好梦~"
 
     # ── 5. 久未互动 ──
     last_chat = memory_store._get_last_interaction(user_id)
@@ -181,7 +186,8 @@ async def sunday_should_push(user_id: str, llm_client=None) -> tuple[str, str] |
             last_care = memory_store._get_last_push(user_id, "care")
             if not last_care or (now - last_care).total_seconds() > 14400:
                 memory_store._record_push(user_id, "care")
-                return "care", await _build_simple_greeting(user_id, llm_client, "care", now)
+                html = await _build_simple_greeting(user_id, llm_client, "care", now)
+                return "care", html, "💕 想你了呢~"
 
     # ── 6. AI 主动创作推送 ──
     from app.knowledge_push import should_push_knowledge, creative_decision, generate_creative_content
@@ -216,6 +222,13 @@ async def _build_creative_post(user_id: str, llm_client, decision: dict, now: da
         "type_description": f"创意推送，内容是{creative['content_type']}，氛围{creative['vibe']}",
     })
 
+    # 尝试获取配图
+    image_url = ""
+    try:
+        image_url = get_image_url(creative['title'])
+    except Exception:
+        pass
+
     from app.email_templates import creative_post
     html = creative_post(
         palette=palette,
@@ -223,9 +236,11 @@ async def _build_creative_post(user_id: str, llm_client, decision: dict, now: da
         title=creative["title"],
         content=creative["content"],
         vibe=creative["vibe"],
+        image_url=image_url,
     )
 
-    subject = f"{creative['title']}"
+    # 使用内容标题作为邮件主题
+    subject = creative['title'] if creative['title'] else f"✨ Sunday · {creative['content_type']}"
     return html, subject
 
 

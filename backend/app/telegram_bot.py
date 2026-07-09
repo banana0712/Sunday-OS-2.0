@@ -445,7 +445,7 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await update.message.reply_text(f"❌ 报告生成出了点小问题：{str(e)[:100]}")
 
     elif intent_type == "creative_push":
-        # 立即创作推送
+        # 立即创作推送 — 聊天框简短告知，邮件发完整内容
         if not topic:
             await update.message.reply_text("嗯？你想让我写什么主题呀？告诉我嘛~")
             return
@@ -461,13 +461,14 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             decision = {"content_type": "小短文", "topic": topic, "vibe": style if style != "auto" else "温暖治愈"}
             creative = await generate_creative_content(llm_service.client, user_id, decision)
 
-            # 发送到 Telegram
-            msg = f"✨ *{creative['title']}*\n\n{creative['content']}\n\n— Sunday 为你创作 💕"
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            # ── 关键修复：聊天框发一句简短的个性化告知，不发邮件内容 ──
+            chat_reply = await _generate_push_chat_reply(llm_service.client, creative, user_id)
+            await update.message.reply_text(chat_reply)
 
-            # 也发邮件
+            # 邮件发送完整内容（使用内容标题作为邮件主题）
             from app.mailer import send_email
             from app.email_templates import ai_design, creative_post
+            from app.file_generator import get_image_url
             from datetime import datetime as dt
 
             palette = await ai_design(llm_service.client, user_id, "creative", {
@@ -475,9 +476,20 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 "weekday_str": "", "weather_text": "", "prefs_text": "",
                 "type_description": f"创意推送，内容是{creative['content_type']}，氛围{creative['vibe']}",
             })
+
+            # 尝试获取配图
+            image_url = ""
+            try:
+                image_url = get_image_url(creative['title'])
+            except Exception:
+                pass
+
             html = creative_post(palette=palette, content_type=creative['content_type'],
-                                 title=creative['title'], content=creative['content'], vibe=creative['vibe'])
-            send_email(subject=creative['title'], html_body=html)
+                                 title=creative['title'], content=creative['content'],
+                                 vibe=creative['vibe'], image_url=image_url)
+            # 使用内容标题作为邮件主题
+            email_subject = creative['title'] if creative['title'] else f"✨ Sunday · {creative['content_type']}"
+            send_email(subject=email_subject, html_body=html)
 
         except Exception as e:
             logger.error(f"创意推送失败: {e}")
@@ -896,6 +908,52 @@ async def _auto_check_plan_done(message: str, user_id: str, update: Update):
                         return
     except Exception:
         pass  # 静默失败，不影响聊天
+
+
+async def _generate_push_chat_reply(llm_client, creative: dict, user_id: str) -> str:
+    """
+    为立即推送生成聊天框的简短告知，与邮件内容不同。
+    避免聊天框和邮件发一样的内容。
+    """
+    from app.config import settings as app_settings
+    from app.memory import memory_store
+
+    name = ""
+    facts = memory_store.search(user_id, category="fact", limit=3)
+    for f in facts:
+        tags = f.get("tags", [])
+        if "昵称" in tags:
+            for tag in tags:
+                if tag not in ["昵称", "姓名"] and len(tag) <= 6:
+                    name = tag
+                    break
+
+    prompt = f"""你是 Sunday。你刚为用户创作了一篇内容，现在要通过邮件发送给他。
+
+创作内容：
+- 标题：{creative['title']}
+- 类型：{creative['content_type']}
+- 氛围：{creative['vibe']}
+
+请用 1-2 句话告诉用户「内容已经创作好并通过邮件发送了」，语气温柔甜美。
+重要：不要重复或概括邮件里的内容！只需要告知已发送+一句俏皮话即可。
+
+称呼用户为{name or '朋友'}。
+
+示例：
+"好啦~ 一篇关于夏夜萤火虫的小短文已经悄悄飞到你邮箱里啦 ✨ 记得查收哦~"
+"搞定！你的专属推送已经在邮箱等你啦 📬 去看看吧~" """
+
+    try:
+        resp = await llm_client.chat.completions.create(
+            model=app_settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9, max_tokens=150,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        # fallback
+        return f"好啦~ 「{creative['title']}」已经发到你邮箱啦 ✨ 去看看吧~"
 
 
 def _is_quality_feedback(title: str, detail: str) -> bool:

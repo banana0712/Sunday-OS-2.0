@@ -457,9 +457,9 @@ def news_card(
 
 def creative_post(
     palette: dict, content_type: str = "小短文", title: str = "",
-    content: str = "", vibe: str = "",
+    content: str = "", vibe: str = "", image_url: str = "",
 ) -> str:
-    """通用创作模板 — Sunday 想写什么就写什么"""
+    """通用创作模板 — Sunday 想写什么就写什么。支持配图。"""
     now = datetime.now(TZ)
     time_str = now.strftime("%H:%M")
 
@@ -473,13 +473,25 @@ def creative_post(
             vibe_icon = v
             break
 
+    # ── 配图横幅 ──
+    banner = ""
+    if image_url:
+        banner = f"""<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:14px;overflow:hidden;margin-bottom:16px;box-shadow:0 4px 16px rgba(0,0,0,0.06);">
+<tr><td style="padding:0;">
+<img src="{image_url}" style="width:100%;max-width:500px;display:block;border-radius:14px;" alt="">
+</td></tr></table>"""
+    else:
+        # 没有图片时用装饰 banner
+        deco_emojis = palette.get("decor_emojis", ["✨"])
+        banner = f"""<table width="100%" cellpadding="0" cellspacing="0" style="background:{palette['gradient']};border-radius:16px;margin-bottom:16px;">
+<tr><td style="padding:20px 0;text-align:center;">
+<div style="font-size:11px;color:{palette['muted']};letter-spacing:3px;">{' '.join(deco_emojis * 2)}</div>
+</td></tr></table>"""
+
     body = f"""
     {_header(f"{vibe_icon} Sunday · {content_type}", "随手写点什么，分享给你~", palette)}
 
-    <table width="100%" cellpadding="0" cellspacing="0" style="background:{palette['gradient']};border-radius:16px;margin-bottom:14px;">
-    <tr><td style="padding:20px 0;text-align:center;">
-    <div style="font-size:11px;color:{palette['muted']};letter-spacing:3px;">{' '.join(palette.get('decor_emojis', ['✨']) * 2)}</div>
-    </td></tr></table>
+    {banner}
 
     <div style="font-size:18px;font-weight:700;color:{palette['title']};margin-bottom:14px;line-height:1.5;text-align:center;">{title}</div>
 

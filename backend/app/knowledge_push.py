@@ -31,18 +31,25 @@ async def should_push_knowledge(user_id: str, now: datetime) -> str | None:
     if today_count >= 2:
         return None
 
-    # 冷却：至少间隔 3 小时
+    # 冷却：至少间隔 2 小时（从3小时缩短）
     last_kb = _get_last_knowledge_time(user_id)
-    if last_kb and (now - last_kb).total_seconds() < 10800:
+    if last_kb and (now - last_kb).total_seconds() < 7200:
         return None
 
-    # 如果用户最近1小时内有互动，等用户主动找
+    # 如果用户最近 30 分钟内有互动，等用户主动找（从1小时缩短）
     last_chat = memory_store._get_last_interaction(user_id)
-    if last_chat and (now - last_chat).total_seconds() < 3600:
+    if last_chat and (now - last_chat).total_seconds() < 1800:
         return None
 
-    # 30% 概率触发创意决策（不是每次都问AI，节省token）
-    if random.random() > 0.3:
+    # ── 智能触发概率 ──
+    # 黄金时段（上午10-11点、下午3-4点、晚上8-9点）：更高触发率
+    golden_hours = (10, 11, 15, 16, 20, 21)
+    if hour in golden_hours:
+        trigger_prob = 0.55  # 黄金时段 55%
+    else:
+        trigger_prob = 0.35  # 普通时段 35%（从30%提高）
+
+    if random.random() > trigger_prob:
         return None
 
     return "creative"  # 告诉上层：让AI做创意决策

@@ -28,6 +28,47 @@
 
 ---
 
+## v3.2.1 - 2026-07-09 08:20
+
+### 🔧 紧急修复 — 邮件推送系统 5 大 Bug
+
+#### 1. 返回值类型不一致导致推送静默失败
+- `sunday_should_push()` 声明返回 2 元组，实际返回 3 元组，且频率上限检查返回 `None, None`（2个）导致解包崩溃
+- 修复：统一为 3 元组 `(type, html, subject) | (None, None, None)`
+- 影响文件：`app/mailer.py`, `app/main.py`
+
+#### 2. 立即推送时聊天框重复邮件内容
+- 用户说「写一篇XX」→ Telegram 和邮件发完全一样的内容 → 体验极差
+- 修复：聊天框改为 AI 生成简短告知（1-2句俏皮话），邮件发完整内容
+- 新增 `_generate_push_chat_reply()` 函数
+- 影响文件：`app/telegram_bot.py`
+
+#### 3. 邮件主题不使用内容标题
+- creative 类型邮件主题固定为「Sunday 给你发消息啦~ 💕」而非文章标题
+- 修复：`_build_creative_post` 返回 `creative['title']` 作为 subject，`_pick_subject_for_type` 添加 creative 兜底
+- 影响文件：`app/mailer.py`, `app/main.py`
+
+#### 4. 邮件配图比例偏低
+- `creative_post` 模板完全没有图片支持，只有 emoji banner
+- 修复：添加 `image_url` 参数，优先使用 LoremFlickr 配图，无图时 fallback 装饰 banner
+- `_build_creative_post` 自动尝试获取配图
+- 影响文件：`app/email_templates.py`, `app/mailer.py`
+
+#### 5. 主动推送触发概率太低
+- 30% 概率 × 3h 冷却 × 1h 无互动 → 几乎从不触发
+- 修复：
+  - 触发概率：普通时段 30%→35%，黄金时段（10-11/15-16/20-21点）55%
+  - 冷却时间：3h→2h
+  - 互动冷却：1h→30min
+- 影响文件：`app/knowledge_push.py`
+
+### 优化
+- `/api/push/pending` 返回增加 `subject` 字段方便调试
+- `/api/push/send` knowledge 类型改为「知识分享」标签
+- 所有 return 路径显式 3 元组，防止解包错误
+
+---
+
 ## v3.2.0 - 2026-07-09 06:35
 
 ### 新增功能

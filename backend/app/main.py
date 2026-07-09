@@ -832,14 +832,16 @@ async def get_pending_push(user_id: str, request: Request):
     if result[1] is None:
         return {"has_message": False, "message": None, "type": "idle"}
 
-    template_type, html_body, custom_subject = result if len(result) >= 3 else (*result, None)
-    subject = custom_subject or _pick_subject_for_type(template_type)
+    template_type, html_body, custom_subject = result
+    # 优先使用 sunday_should_push 返回的主题，其次用模板默认主题
+    subject = custom_subject if custom_subject else _pick_subject_for_type(template_type)
     email_sent = send_email(subject=subject, html_body=html_body)
     return {
         "has_message": True,
         "template_type": template_type,
         "email_sent": email_sent,
         "type": "push",
+        "subject": subject,
     }
 
 
@@ -867,7 +869,7 @@ async def send_custom_push(request: Request):
             "noon": lambda u, c, n: _build_simple_greeting(u, c, "noon", n),
             "evening": lambda u, c, n: _build_simple_greeting(u, c, "evening", n),
             "care": lambda u, c, n: _build_simple_greeting(u, c, "care", n),
-            "knowledge": lambda u, c, n: _build_creative_post(u, c, {"content_type": "小短文", "topic": "一个有趣的话题", "vibe": "温暖治愈"}, n),
+            "knowledge": lambda u, c, n: _build_creative_post(u, c, {"content_type": "知识分享", "topic": "一个有趣的话题", "vibe": "温暖治愈"}, n),
             "creative": lambda u, c, n: _build_creative_post(u, c, {"content_type": "小短文", "topic": "一个有趣的话题", "vibe": "温暖治愈"}, n),
         }
         builder = builders.get(template_type)
@@ -953,6 +955,7 @@ def _pick_subject_for_type(template_type: str) -> str:
         "evening": "🌙 晚安好梦~",
         "care": "💕 想你了呢~",
         "knowledge": "📚 Sunday 知识小卡片",
+        "creative": "✨ Sunday 为你创作",  # 兜底，实际由 _build_creative_post 返回标题
     }
     return subjects.get(template_type, "Sunday 给你发消息啦~ 💕")
 
