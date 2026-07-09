@@ -90,8 +90,11 @@ class VoiceService:
     async def _transcribe_inner(self, audio_data: bytes, audio_format: str) -> str:
         # 非 PCM 格式先转码
         if audio_format != "pcm":
+            print(f"🎤 [ASR] 开始转码: {audio_format} → pcm ({len(audio_data)} bytes)")
             audio_data = await self._convert_to_pcm(audio_data, audio_format)
+            print(f"🎤 [ASR] 转码完成: pcm {len(audio_data)} bytes")
 
+        print(f"🎤 [ASR] 连接 WebSocket... asr_key={'有' if self.asr_app_key else '❌无'}")
         request_id = str(uuid.uuid4())
         headers = {
             "X-Api-App-Key": self.asr_app_key,
@@ -147,10 +150,13 @@ class VoiceService:
                     text = self._parse_response(result)
                     if text:
                         results.append(text)
+                        print(f"🎤 [ASR] 中间结果: {text[:60]}")
             except asyncio.TimeoutError:
                 pass
 
-        return results[-1] if results else ""
+        final = results[-1] if results else ""
+        print(f"🎤 [ASR] 最终结果: '{final[:100] if final else '(空)'}' results_count={len(results)}")
+        return final
 
     def _parse_response(self, raw_data: bytes) -> str:
         """解析 ASR 返回的二进制帧"""

@@ -5,6 +5,7 @@ Sunday 在 Telegram 上跟你像朋友一样聊天 💕
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -82,11 +83,16 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         audio_bytes = await file.download_as_bytearray()
         audio_data = bytes(audio_bytes)
 
-        logger.info(f"收到语音消息: user={user_id} size={len(audio_data)}bytes")
+        print(f"🎤 [VOICE] 收到语音: user={user_id} size={len(audio_data)}bytes")
 
         # 2. ASR 转文字
         text = await voice_service.transcribe(audio_data, audio_format="ogg")
+        print(f"🎤 [VOICE] ASR 结果: '{text[:100] if text else '(空)'}'")
         if not text or len(text.strip()) < 1:
+            # 打印 ASR 配置状态帮助排查
+            has_asr_key = bool(os.environ.get("DOUBAO_ASR_APP_KEY"))
+            has_asr_ak = bool(os.environ.get("DOUBAO_ASR_ACCESS_KEY"))
+            print(f"🎤 [VOICE] ASR 未识别到文字！ASR_KEY={'有' if has_asr_key else '❌无'} ASR_AK={'有' if has_asr_ak else '❌无'}")
             await update.message.reply_text("嗯？刚才没听清呢，再说一次好不好~ 🥺")
             return
 
