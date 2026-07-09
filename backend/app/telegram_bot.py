@@ -140,7 +140,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             pass  # 如果连 reply_text 都发不了就算了
 
 
-async def _check_voice_quota(user_id: str) -> bool:
+def _check_voice_quota(user_id: str) -> bool:
     """检查今日语音消息是否超限"""
     from datetime import datetime, timedelta
     since = (datetime.now(TZ) - timedelta(hours=24)).isoformat()
