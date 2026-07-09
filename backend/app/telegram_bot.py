@@ -408,12 +408,9 @@ async def _handle_sing(
         recall_text = recall_resp.choices[0].message.content or ""
         print(f"🎵 [RECALL] 完整歌词: {recall_text[:300]}")
 
-        json_match = _re.search(r'\{[^}]*"lyrics"[^}]*\}', recall_text, _re.DOTALL)
-        if not json_match:
-            json_match = _re.search(r'\{.+\}', recall_text, _re.DOTALL)
-
-        if json_match:
-            song_info = json.loads(json_match.group())
+        # 鲁棒的 JSON 提取：找到第一个 { 和最后一个 }
+        song_info = _extract_json(recall_text)
+        if song_info:
             full_lyrics = song_info.get("lyrics", "")
             style = song_info.get("style", "流行")
             bpm = song_info.get("bpm", "")
@@ -423,7 +420,8 @@ async def _handle_sing(
             raise ValueError("无法解析 JSON")
     except Exception as e:
         print(f"🎵 [RECALL] 回忆失败: {e}，降级")
-        full_lyrics = f"[chorus]\n{song_name}\n是我想对你唱的歌"
+        # 更好的降级：直接用歌曲名和风格生成，让 music-2.6 自由发挥
+        full_lyrics = f"[verse]\n唱一首关于{song_name}的歌\n回忆里的旋律\n\n[chorus]\n{song_name}\n是我想对你唱的歌\n在时光里轻轻哼着"
         style = song_style
         bpm = ""
         mood = ""
@@ -465,16 +463,20 @@ async def _handle_sing(
             max_tokens=500,
             temperature=0.5,
         )
-        selected_lyrics = select_resp.choices[0].message.content or full_lyrics
+        selected_lyrics = select_resp.choices[0].message.content or ""
+        # 如果 LLM 返回的内容看起来像歌词（包含标签），用选中的；否则用完整歌词
+        if not selected_lyrics.strip() or '[' not in selected_lyrics:
+            selected_lyrics = full_lyrics
         print(f"🎵 [SELECT] 选中段落: {selected_lyrics[:200]}")
     except Exception as e:
-        print(f"🎵 [SELECT] 选择失败: {e}，使用完整歌词")
+        print(f"🎵 [SELECT] 选择失败: {e}，跳过选择，直接用完整歌词")
         selected_lyrics = full_lyrics
 
     # 清理歌词
     selected_lyrics = _re.sub(r'[（(].*?[）)]', '', selected_lyrics).strip()
-    if not selected_lyrics.strip():
-        selected_lyrics = f"[chorus]\n{song_name}\n是我想对你唱的歌"
+    if not selected_lyrics.strip() or len(selected_lyrics) < 20:
+        # 歌词太短，降级
+        selected_lyrics = f"[verse]\n唱一首关于{song_name}的歌\n回忆里的旋律轻轻响起\n\n[chorus]\n{song_name}\n是我最想唱给你听的歌\n在时光里轻轻哼着"
 
     # ===== 步骤3: 构造精准 prompt → 生成 =====
     prompt_parts = []
@@ -565,6 +567,49 @@ async def _handle_cover_mode(update, context, chat_id, song_name, song_style, ll
     except Exception as e:
         print(f"🎵 [COVER] 翻唱失败: {e}")
         await status_msg.edit_text("翻唱出了点问题 😢 试试说「唱」而不是「翻唱」吧~")
+
+
+def _extract_json(text: str) -> dict | None:
+    """从 LLM 回复中鲁棒地提取 JSON 对象。
+    处理嵌套花括号、多行文本、markdown 代码块等。
+    """
+    import re as _re
+
+    # 去掉 markdown 代码块
+    text = _re.sub(r'```(?:json)?\s*', '', text)
+    text = _re.sub(r'```', '', text)
+
+    # 找到第一个 { 和对应的 }
+    start = text.find('{')
+    if start == -1:
+        return None
+
+    # 从 start 开始，用栈匹配花括号
+    depth = 0
+    end = -1
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    if end == -1:
+        return None
+
+    json_str = text[start:end + 1]
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        # 尝试修复常见问题：未转义的换行符在字符串中
+        try:
+            fixed = _re.sub(r'(?<!\\)"([^"]*\n[^"]*)"', lambda m: '"' + m.group(1).replace('\n', '\\n') + '"', json_str)
+            return json.loads(fixed)
+        except:
+            return None
 
 
 def _extract_chorus(lyrics: str) -> str:
