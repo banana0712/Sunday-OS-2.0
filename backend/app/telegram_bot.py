@@ -129,22 +129,69 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         memory_store.add_conversation(user_id, "user", f"[语音] {text}")
         log("chat", user_id, "telegram", f"[语音] {text[:100]}")
 
-        # 5. 检测唱歌请求 — 在 LLM 调用前拦截，用专用 prompt 生成歌词
-        sing_keywords = ["唱歌", "唱一首", "唱个歌", "唱支歌", "唱什么", "唱一个", "来一首", "来一个", "唱来听听", "唱首歌"]
-        is_singing = any(kw in text for kw in sing_keywords)
+        # 5. 用 LLM 判断是否要唱歌 + 生成歌词
+        # 不再用关键词匹配，让 AI 判断用户意图
+        from app.main import llm_service, SUNDAY_SYSTEM_PROMPT
 
-        if is_singing:
-            print(f"🎵 [MUSIC] 检测到唱歌请求: '{text}'")
+        # 获取最近的对话上下文
+        recent_messages = memory_store.get_conversation_context(user_id, max_turns=3) or ""
+
+        song_decision_prompt = f"""你是 Sunday，一个会唱歌的 AI 女孩。请判断用户是否想让你唱歌。
+
+用户说：「{text}」
+
+最近对话：
+{recent_messages[:500]}
+
+判断规则：
+- 明确要求唱歌（"唱首歌""唱歌""唱一个"等）→ 唱歌
+- 提到音乐、旋律、歌曲相关 → 唱歌
+- 普通聊天、提问、闲聊 → 不唱歌
+
+请只回复一个 JSON：
+{{"should_sing": true/false, "song_theme": "歌曲主题描述，如用户指定了主题就按用户的意思，否则根据上下文推断一个合适的主题", "style": "音乐风格描述，如甜美J-Pop、温柔民谣、轻快儿歌等"}}"""
+
+        should_sing = False
+        song_theme = ""
+        song_style = "甜美可爱的女声，轻快J-Pop，动漫主题曲风格"
+        try:
+            decision_resp = await llm_service.client.chat.completions.create(
+                model=llm_service.model_fast,
+                messages=[{"role": "user", "content": song_decision_prompt}],
+                max_tokens=150,
+                temperature=0.3,
+            )
+            decision_text = decision_resp.choices[0].message.content or ""
+            print(f"🎵 [MUSIC] AI 判断结果: {decision_text[:200]}")
+            # 提取 JSON
+            import re as _re
+            json_match = _re.search(r'\{[^}]+\}', decision_text)
+            if json_match:
+                decision = json.loads(json_match.group())
+                should_sing = decision.get("should_sing", False)
+                song_theme = decision.get("song_theme", "")
+                song_style = decision.get("style", song_style)
+        except Exception as e:
+            print(f"🎵 [MUSIC] AI 判断失败: {e}")
+            # 降级：用关键词兜底
+            sing_keywords = ["唱歌", "唱一首", "唱个歌", "唱支歌", "唱什么", "唱一个", "来一首", "来一个", "唱来听听", "唱首歌"]
+            should_sing = any(kw in text for kw in sing_keywords)
+
+        if should_sing:
+            print(f"🎵 [MUSIC] AI 决定唱歌！主题={song_theme} 风格={song_style}")
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
             try:
                 # 用专用 prompt 让 LLM 生成歌词
-                from app.main import llm_service
-                song_prompt = f"""请为「{text}」这个请求创作一首简短可爱的歌词。
+                lyrics_prompt = f"""请创作一首简短可爱的歌词。
+
+用户想听的主题：{song_theme}
+音乐风格：{song_style}
+
 要求：
 - 4-8句歌词，每句一行，用换行分隔
-- 像J-Pop或动漫主题曲风格，甜美可爱
 - 用[verse]和[chorus]标记段落
-- 只输出歌词，不要任何其他文字、解释或括号描述
+- 歌词要贴合主题，甜美可爱
+- 只输出歌词本身，不要任何其他文字、解释或括号描述
 
 示例格式：
 [verse]
@@ -156,7 +203,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
                 song_resp = await llm_service.client.chat.completions.create(
                     model=llm_service.model_fast,
-                    messages=[{"role": "user", "content": song_prompt}],
+                    messages=[{"role": "user", "content": lyrics_prompt}],
                     max_tokens=300,
                     temperature=0.9,
                 )
@@ -166,7 +213,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 # 调 MiniMax 生成歌曲
                 audio_reply = await voice_service.generate_music(
                     lyrics=lyrics,
-                    style="甜美可爱的女声，轻快J-Pop，动漫主题曲风格，温柔甜美"
+                    style=song_style
                 )
                 print(f"🎵 [MUSIC] 歌曲生成完成，发送中...")
 
