@@ -465,6 +465,8 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     elif intent_type == "creative_push":
         # 立即创作推送 — 聊天框简短告知，邮件发完整内容
         
+        from app.main import llm_service
+        
         # ── 智能 topic 处理 ──
         # 如果 topic 为空或太模糊（如"推送内容"、"来一封"等），让 AI 自己选主题
         vague_topics = ["推送内容", "推送", "内容", "来一封", "一篇", "邮件", "消息", ""]
@@ -476,7 +478,6 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # ── 让 AI 生成多样化的「正在创作」回复 ──
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
         
-        # 根据是否有具体主题，生成不同的回复
         if actual_topic:
             ack_reply = await _generate_ack_reply(llm_service.client, actual_topic, user_id)
         else:
