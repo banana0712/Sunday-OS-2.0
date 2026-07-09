@@ -46,6 +46,16 @@ class Settings(BaseSettings):
     # Telegram Bot
     telegram_token: str = Field(default="", alias="TELEGRAM_TOKEN")
 
+    # 语音服务（豆包 ASR + TTS）
+    voice_asr_app_key: str = Field(default="", alias="DOUBAO_ASR_APP_KEY")
+    voice_asr_access_key: str = Field(default="", alias="DOUBAO_ASR_ACCESS_KEY")
+    voice_asr_resource_id: str = Field(default="volc.seedasr.sauc.duration", alias="DOUBAO_ASR_RESOURCE_ID")
+    voice_tts_app_id: str = Field(default="", alias="DOUBAO_TTS_APP_ID")
+    voice_tts_access_key: str = Field(default="", alias="DOUBAO_TTS_ACCESS_KEY")
+    voice_tts_speaker: str = Field(default="zh_female_vv_uranus_bigtts", alias="DOUBAO_TTS_SPEAKER")
+    voice_max_daily: int = Field(default=50, alias="VOICE_MAX_DAILY")
+    voice_enabled: bool = Field(default=True, alias="VOICE_ENABLED")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -54,6 +54,198 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(greeting)
 
 
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理语音消息：下载 → ASR 转文字 → LLM 回复 → TTS 合成语音 → 发送"""
+    from app.voice_service import voice_service, EMOTION_PROMPTS
+
+    user_id = _get_user_id(update)
+    chat_id = update.effective_chat.id
+
+    # 检查语音功能是否启用
+    if not settings.voice_enabled:
+        await update.message.reply_text("语音功能暂时关闭啦~ 先打字聊天吧 💕")
+        return
+
+    # 检查每日配额
+    if not _check_voice_quota(user_id):
+        await update.message.reply_text("今天的语音额度用完啦~ 打字聊吧 💕")
+        return
+
+    # 发送"正在听"状态
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    try:
+        # 1. 下载语音文件
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = await file.download_as_bytearray()
+        audio_data = bytes(audio_bytes)
+
+        print(f"🤖 收到语音消息: {len(audio_data)} bytes")
+
+        # 2. ASR 转文字
+        text = await voice_service.transcribe(audio_data, audio_format="ogg")
+        if not text or len(text.strip()) < 1:
+            await update.message.reply_text("嗯？刚才没听清呢，再说一次好不好~ 🥺")
+            return
+
+        print(f"🤖 ASR 识别结果: {text[:50]}")
+
+        # 3. 记录到对话流（带标记）
+        memory_store.add_conversation(user_id, "user", f"[语音] {text}")
+        log("chat", user_id, "telegram", f"[语音] {text[:100]}")
+
+        # 4. 复用核心聊天逻辑生成回复
+        reply = await _process_message_text(text, user_id, update, context)
+
+        if not reply:
+            return
+
+        # 5. 发送"正在说话"状态
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+
+        # 6. TTS 合成语音
+        try:
+            audio_reply = await voice_service.synthesize(reply, emotion="sweet")
+            # 发送语音回复
+            import io
+            await context.bot.send_voice(
+                chat_id=chat_id,
+                voice=io.BytesIO(audio_reply),
+                caption="🎙️ 语音版来啦~"
+            )
+        except Exception as tts_e:
+            logger.error(f"TTS 合成失败: {tts_e}")
+            # 降级为文字回复
+            await _send_smart_reply(update, reply)
+            return
+
+        # 7. 同时发送文字版（可选，方便用户阅读）
+        await update.message.reply_text("📝 文字版：")
+        await _send_smart_reply(update, reply)
+
+        # 8. 记录语音配额
+        _record_voice_usage(user_id)
+
+    except Exception as e:
+        logger.error(f"语音消息处理失败: {e}")
+        await update.message.reply_text("唔... 语音处理出了点小问题，打字跟我说好不好？🥺")
+
+
+async def _check_voice_quota(user_id: str) -> bool:
+    """检查今日语音消息是否超限"""
+    from datetime import datetime, timedelta
+    since = (datetime.now(TZ) - timedelta(hours=24)).isoformat()
+    conn = get_db()
+    count = conn.execute(
+        "SELECT COUNT(*) as cnt FROM conversation_flow WHERE user_id = ? AND role = 'user' AND content LIKE '[语音]%' AND created_at >= ?",
+        (user_id, since)
+    ).fetchone()["cnt"]
+    conn.close()
+    return count < settings.voice_max_daily
+
+
+def _record_voice_usage(user_id: str):
+    """记录一次语音使用（复用 conversation_flow 表）"""
+    # 已经在 handle_voice_message 里记录了 [语音] 标记，这里无需重复
+    pass
+
+
+async def _process_message_text(text: str, user_id: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """
+    处理消息文字并返回 LLM 回复。
+    抽取自 handle_message 的核心逻辑，供文字/语音消息共享。
+    """
+    # 自动检测改进反馈
+    is_feedback = _detect_feedback(text, user_id)
+
+    # 自动检测计划完成
+    asyncio.create_task(_auto_check_plan_done(text, user_id, update))
+
+    # AI 意图判断
+    intent = await _ai_detect_intent(text, user_id)
+    if intent:
+        await _handle_ai_intent(update, context, intent, user_id)
+        return ""
+
+    # 检查记忆
+    stats = memory_store.get_stats(user_id)
+    print(f"🤖 用户 {user_id} 的记忆数: {stats['total']}")
+    display_name = update.effective_user.first_name or "朋友"
+
+    # 智能模型选择
+    from app.main import llm_service, select_model, SUNDAY_SYSTEM_PROMPT
+    model_id, chat_mode = select_model(text)
+
+    # 构建 system prompt
+    memories = memory_store.get_context(user_id, message=text)
+    profile = _build_user_profile(user_id)
+    flow = memory_store.get_conversation_context(user_id, max_turns=10)
+    recent_emails = _get_recent_email_summaries(user_id, hours=24)
+
+    full_flow = flow or "（这是你们第一次在Telegram上聊天呢~）"
+    if recent_emails:
+        full_flow = full_flow + "\n\n" + recent_emails
+
+    system_prompt = SUNDAY_SYSTEM_PROMPT.format(
+        current_time=datetime.now(TZ).strftime("%Y年%m月%d日 %H:%M，周%u"),
+        user_profile=profile,
+        conversation_flow=full_flow,
+        memories=memories,
+        chat_mode=chat_mode,
+    )
+
+    # 联网搜索
+    from app.search import should_search, search_web, format_search_results
+    enhanced_message = text
+    if should_search(text):
+        try:
+            results = await asyncio.to_thread(search_web, text, 5)
+            if results and not (len(results) == 1 and "搜索失败" in results[0].get("title", "")):
+                enhanced_message = f"{text}\n\n[网络搜索结果]\n{format_search_results(results)}\n\n请基于以上搜索结果回答，保持Sunday的风格。"
+        except Exception:
+            pass
+
+    # LLM 调用
+    try:
+        needs_long = _needs_long_reply(text)
+        reply_tokens = 2000 if needs_long else 800
+        if "专业模式" in chat_mode:
+            reply_tokens = llm_service.max_tokens
+
+        response = await llm_service.client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": enhanced_message},
+            ],
+            temperature=llm_service.temperature,
+            max_tokens=reply_tokens,
+        )
+
+        reply = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+
+        memory_store.add_conversation(user_id, "assistant", reply, tokens)
+
+        # 记忆提取（异步）
+        from app.main import extract_memories_from_message, _force_extract_info
+        asyncio.create_task(extract_memories_from_message(llm_service.client, text, user_id))
+        _force_extract_info(text, user_id)
+
+        if is_feedback:
+            reply = "📝 已记录到改进日志~ " + reply
+
+        log("reply", user_id, "telegram", reply[:100], f"tokens={tokens} model={model_id}")
+        return reply
+
+    except Exception as e:
+        logger.error(f"LLM 调用失败: {e}")
+        log("error", user_id, "telegram", f"LLM调用失败: {str(e)[:100]}")
+        await update.message.reply_text("唔... 刚刚走神了一下~ 再说一次好不好？🥺")
+        return ""
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息"""
     message_text = update.message.text or ""
@@ -1317,6 +1509,7 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("knowledge", knowledge_cmd))
         app.add_handler(CommandHandler("clean_nick", clean_nick_cmd))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
         app.add_error_handler(error_handler)
         
         print("🤖 Sunday Telegram Bot 已构建，等待启动轮询...")
