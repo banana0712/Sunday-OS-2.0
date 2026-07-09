@@ -218,8 +218,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     specified_song = specified_song.strip()
 
                 if specified_song and len(specified_song) >= 2:
-                    # ===== 指定歌曲 → 翻唱模式（保留原曲旋律）=====
-                    print(f"🎵 [COVER] 用户指定歌曲: {specified_song}")
+                    # ===== 指定歌曲 → 快速原创模式（LLM回忆+music-2.6-free）=====
+                    print(f"🎵 [FAST] 用户指定歌曲: {specified_song}")
                     await _handle_song_cover(
                         update=update,
                         context=context,
@@ -350,152 +350,112 @@ async def _handle_song_cover(
     voice_service,
 ):
     """
-    AI 驱动的歌曲搜索 + 翻唱。
-    流程：
-    1. 网易云搜索歌曲
-    2. AI 筛选最匹配的结果
-    3. 获取试听链接
-    4. 预处理 + 翻唱
-    如果找不到，降级为即兴创作。
+    快速唱歌模式：LLM 回忆歌曲信息 → music-2.6-free 直接生成。
+    
+    核心思路：不依赖 cover 模型（太慢），而是让 LLM 回忆歌曲的
+    歌词+风格+BPM+情绪，用 music-2.6-free 的 prompt 精确控制来
+    「再现」一首歌的感觉。30秒内出结果。
+    
+    如果用户明确说「翻唱」「原曲旋律」「cover」，则走慢速 cover 流程。
     """
     import re as _re
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-    await update.message.reply_text(f"让我在网上找找《{song_name}》... 🔍")
+    status_msg = await update.message.reply_text(f"让我想想《{song_name}》怎么唱... 🎵")
 
-    # ===== 步骤1: 网易云搜索歌曲 =====
-    search_results = await voice_service.search_song(song_name, limit=10)
+    # ===== 步骤1: LLM 回忆歌曲信息（歌词 + 风格 + BPM + 情绪）=====
+    song_recall_prompt = f"""请回忆歌曲「{song_name}」的信息。
 
-    if not search_results:
-        print(f"🎵 [COVER] 网易云搜索无结果")
-        await _fallback_improvise(update, chat_id, song_name, song_style, llm_service, voice_service)
-        return
-
-    # ===== 步骤2: AI 筛选最匹配的歌曲 =====
-    candidates_text = ""
-    for i, s in enumerate(search_results):
-        candidates_text += f"[{i}] {s['name']} - {s['artists']} (专辑: {s['album']})\n"
-
-    selection_prompt = f"""请从以下搜索结果中选出最匹配用户想要的歌曲。
-
-用户想听：{song_name}
-
-搜索结果：
-{candidates_text}
-
-选择规则：
-- 优先选歌名完全匹配的
-- 其次选歌名包含用户关键词的
-- 原唱优先于翻唱
-- 如果搜索结果和用户想要的完全不同，返回 index=-1
+你需要输出：
+1. 这首歌最经典的4-6句歌词（必须是高潮/副歌部分，每句一行）
+2. 这首歌的音乐风格（如抒情民谣、流行摇滚、R&B等）
+3. 大概的BPM（如76 BPM慢歌、120 BPM快歌）
+4. 歌曲情绪（如温暖治愈、伤感思念、热血励志）
+5. 适合的伴奏描述（如钢琴+弦乐、吉他+鼓等）
 
 请只回复一个 JSON：
-{{"index": 0, "reason": "选择原因（一句话）"}}"""
+{{
+  "lyrics": "[chorus]\\n歌词第一句\\n歌词第二句\\n...",
+  "style": "抒情民谣",
+  "bpm": "76 BPM",
+  "mood": "温暖治愈，青春回忆",
+  "instruments": "钢琴加弦乐，温柔编曲"
+}}"""
 
-    selected_index = 0
     try:
-        sel_resp = await llm_service.client.chat.completions.create(
+        recall_resp = await llm_service.client.chat.completions.create(
             model=llm_service.model_fast,
-            messages=[{"role": "user", "content": selection_prompt}],
-            max_tokens=100,
-            temperature=0.2,
+            messages=[{"role": "user", "content": song_recall_prompt}],
+            max_tokens=300,
+            temperature=0.7,
         )
-        sel_text = sel_resp.choices[0].message.content or ""
-        print(f"🎵 [COVER] AI 筛选结果: {sel_text[:200]}")
+        recall_text = recall_resp.choices[0].message.content or ""
+        print(f"🎵 [RECALL] LLM 回忆结果: {recall_text[:300]}")
 
-        json_match = _re.search(r'\{[^}]+\}', sel_text)
+        json_match = _re.search(r'\{[^}]+\}', recall_text, _re.DOTALL)
         if json_match:
-            sel = json.loads(json_match.group())
-            selected_index = sel.get("index", 0)
-            reason = sel.get("reason", "")
-            print(f"🎵 [COVER] 选中 [{selected_index}]: {reason}")
-    except Exception as e:
-        print(f"🎵 [COVER] AI 筛选失败: {e}，使用第一个结果")
-
-    if selected_index < 0 or selected_index >= len(search_results):
-        print(f"🎵 [COVER] AI 认为没有匹配结果")
-        await _fallback_improvise(update, chat_id, song_name, song_style, llm_service, voice_service)
-        return
-
-    selected = search_results[selected_index]
-    song_id = selected["id"]
-    matched_name = selected["name"]
-    matched_artist = selected["artists"]
-
-    await update.message.reply_text(f"找到啦：《{matched_name}》- {matched_artist} 🎶")
-
-    # ===== 步骤3: 获取试听链接 =====
-    song_url = await voice_service.get_song_url(song_id, bitrate=128000)
-
-    if not song_url:
-        print(f"🎵 [COVER] 歌曲 {matched_name} 无试听链接（可能需要VIP）")
-        # 尝试其他搜索结果
-        for i, alt_song in enumerate(search_results):
-            if i == selected_index:
-                continue
-            alt_url = await voice_service.get_song_url(alt_song["id"], bitrate=128000)
-            if alt_url:
-                song_url = alt_url
-                matched_name = alt_song["name"]
-                matched_artist = alt_song["artists"]
-                await update.message.reply_text(f"原版需要VIP，找到了一个可用的版本：《{matched_name}》- {matched_artist} 🎶")
-                break
-
-    if not song_url:
-        print(f"🎵 [COVER] 所有结果都没有试听链接")
-        await _fallback_improvise(update, chat_id, song_name, song_style, llm_service, voice_service)
-        return
-
-    # ===== 步骤4: 快速翻唱 =====
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-    # 只发一条消息，告知用户正在处理
-    status_msg = await update.message.reply_text(f"正在准备翻唱《{matched_name}》... 🎶")
-
-    try:
-        # 预处理原曲（提取旋律特征）
-        preprocess_result = await voice_service.preprocess_cover(song_url)
-        feature_id = preprocess_result["cover_feature_id"]
-        extracted_lyrics = preprocess_result.get("formatted_lyrics", "")
-
-        print(f"🎵 [COVER] 原曲歌词: {extracted_lyrics[:200]}")
-
-        # 提取最精华的副歌（4-6句，大幅加速生成）
-        chorus_lyrics = _extract_chorus(extracted_lyrics)
-        if chorus_lyrics:
-            # 进一步精简：只取前 6 行
-            lines = [l.strip() for l in chorus_lyrics.split('\n') if l.strip()]
-            final_lyrics = '\n'.join(lines[:6])
-            print(f"🎵 [COVER] 精简高潮: {len(final_lyrics)}字, {len(lines[:6])}行")
+            song_info = json.loads(json_match.group())
+            lyrics = song_info.get("lyrics", "")
+            style = song_info.get("style", "流行")
+            bpm = song_info.get("bpm", "")
+            mood = song_info.get("mood", "")
+            instruments = song_info.get("instruments", "")
         else:
-            final_lyrics = extracted_lyrics
+            raise ValueError("无法解析 JSON")
+    except Exception as e:
+        print(f"🎵 [RECALL] 回忆失败: {e}，降级为简单模式")
+        # 简单降级：用歌曲名和风格直接生成
+        lyrics = f"[verse]\n唱一首关于{song_name}的歌\n\n[chorus]\n{song_name}\n是我想对你唱的歌"
+        style = song_style
+        bpm = ""
+        mood = ""
+        instruments = ""
 
-        # 更新状态（不发送新消息，编辑已有消息）
-        try:
-            await status_msg.edit_text(f"正在唱《{matched_name}》的高潮... 🎤")
-        except:
-            pass
+    if not lyrics.strip():
+        lyrics = f"[verse]\n唱一首关于{song_name}的歌\n\n[chorus]\n{song_name}\n是我想对你唱的歌"
 
-        cover_prompt = f"甜美可爱的女声，J-Pop动漫主题曲风格，温柔甜美，{song_style}"
-        audio_reply = await voice_service.generate_cover(
-            cover_feature_id=feature_id,
-            lyrics=final_lyrics,
-            prompt=cover_prompt,
-        )
+    # ===== 步骤2: 构造精准的 music-2.6 prompt =====
+    prompt_parts = []
+    if bpm:
+        prompt_parts.append(bpm)
+    if style:
+        prompt_parts.append(style)
+    if mood:
+        prompt_parts.append(mood)
+    prompt_parts.append("甜美可爱的少女声，Sunday风格")
+    if instruments:
+        prompt_parts.append(instruments)
+    prompt_parts.append(song_style)
 
-        print(f"🎵 [COVER] 翻唱完成，发送中...")
-        import io
-        voice_file = io.BytesIO(audio_reply)
-        voice_file.name = "cover.mp3"
-        # 清理状态消息
-        try:
-            await status_msg.delete()
-        except:
-            pass
-        await context.bot.send_voice(chat_id=chat_id, voice=voice_file, caption="")
+    music_prompt = "，".join(prompt_parts)
 
-    except Exception as cover_e:
-        print(f"🎵 [COVER] 翻唱流程失败: {cover_e}")
-        raise
+    # 清理歌词
+    lyrics = _re.sub(r'[（(].*?[）)]', '', lyrics).strip()
+
+    print(f"🎵 [FAST-MUSIC] prompt: {music_prompt[:150]}")
+    print(f"🎵 [FAST-MUSIC] lyrics: {lyrics[:150]}")
+
+    # ===== 步骤3: 更新状态 → 快速生成 =====
+    try:
+        await status_msg.edit_text(f"正在唱《{song_name}》... 🎤")
+    except:
+        pass
+
+    audio_reply = await voice_service.generate_music(
+        lyrics=lyrics,
+        style=music_prompt,
+    )
+
+    print(f"🎵 [FAST-MUSIC] 生成完成，发送中...")
+
+    import io
+    voice_file = io.BytesIO(audio_reply)
+    voice_file.name = "song.mp3"
+    try:
+        await status_msg.delete()
+    except:
+        pass
+    await context.bot.send_voice(chat_id=chat_id, voice=voice_file, caption="")
 
 
 def _extract_chorus(lyrics: str) -> str:
