@@ -98,11 +98,16 @@ class VoiceService:
         request_id = str(uuid.uuid4())
         headers = {
             "X-Api-App-Key": self.asr_app_key,
-            "X-Api-Access-Key": self.asr_access_key,
             "X-Api-Resource-Id": self.asr_resource_id,
             "X-Api-Request-Id": request_id,
             "X-Api-Sequence": "-1",
         }
+        # 新版控制台只需 X-Api-App-Key；旧版还需要 X-Api-Access-Key
+        if self.asr_access_key:
+            headers["X-Api-Access-Key"] = self.asr_access_key
+            print(f"🎤 [ASR] 使用旧版鉴权（含 Access Key）")
+        else:
+            print(f"🎤 [ASR] 使用新版鉴权（仅 App Key）")
 
         results = []
         async with websockets.connect(
