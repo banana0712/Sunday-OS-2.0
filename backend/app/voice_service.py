@@ -357,7 +357,7 @@ class VoiceService:
 
         print(f"🎵 [COVER-PRE] 预处理原曲: {audio_url[:80]}...")
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=90) as client:
             resp = await client.post(MINIMAX_COVER_PREPROCESS_URL, headers=headers, json=payload)
             data = resp.json()
 
@@ -427,7 +427,7 @@ class VoiceService:
 
         print(f"🎵 [COVER] 生成翻唱: feature_id={cover_feature_id[:20]}... lyrics_len={len(lyrics)}")
 
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             resp = await client.post(MINIMAX_MUSIC_URL, headers=headers, json=payload)
             data = resp.json()
 

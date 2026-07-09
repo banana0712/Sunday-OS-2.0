@@ -446,28 +446,34 @@ async def _handle_song_cover(
         await _fallback_improvise(update, chat_id, song_name, song_style, llm_service, voice_service)
         return
 
-    # ===== 步骤4: 用歌曲 URL 直接翻唱 =====
+    # ===== 步骤4: 快速翻唱 =====
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-    await update.message.reply_text("正在分析旋律... 🎶")
+    # 只发一条消息，告知用户正在处理
+    status_msg = await update.message.reply_text(f"正在准备翻唱《{matched_name}》... 🎶")
 
     try:
+        # 预处理原曲（提取旋律特征）
         preprocess_result = await voice_service.preprocess_cover(song_url)
         feature_id = preprocess_result["cover_feature_id"]
         extracted_lyrics = preprocess_result.get("formatted_lyrics", "")
 
         print(f"🎵 [COVER] 原曲歌词: {extracted_lyrics[:200]}")
 
-        # 提取高潮部分（副歌）加速翻唱
+        # 提取最精华的副歌（4-6句，大幅加速生成）
         chorus_lyrics = _extract_chorus(extracted_lyrics)
         if chorus_lyrics:
-            print(f"🎵 [COVER] 提取高潮: {chorus_lyrics[:100]}")
-            final_lyrics = chorus_lyrics
-            await update.message.reply_text("提取了歌曲的高潮部分来翻唱... 🎶")
+            # 进一步精简：只取前 6 行
+            lines = [l.strip() for l in chorus_lyrics.split('\n') if l.strip()]
+            final_lyrics = '\n'.join(lines[:6])
+            print(f"🎵 [COVER] 精简高潮: {len(final_lyrics)}字, {len(lines[:6])}行")
         else:
             final_lyrics = extracted_lyrics
 
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-        await update.message.reply_text("正在用 Sunday 的风格翻唱... 🎤")
+        # 更新状态（不发送新消息，编辑已有消息）
+        try:
+            await status_msg.edit_text(f"正在唱《{matched_name}》的高潮... 🎤")
+        except:
+            pass
 
         cover_prompt = f"甜美可爱的女声，J-Pop动漫主题曲风格，温柔甜美，{song_style}"
         audio_reply = await voice_service.generate_cover(
@@ -480,6 +486,11 @@ async def _handle_song_cover(
         import io
         voice_file = io.BytesIO(audio_reply)
         voice_file.name = "cover.mp3"
+        # 清理状态消息
+        try:
+            await status_msg.delete()
+        except:
+            pass
         await context.bot.send_voice(chat_id=chat_id, voice=voice_file, caption="")
 
     except Exception as cover_e:
