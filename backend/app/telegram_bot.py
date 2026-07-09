@@ -680,11 +680,11 @@ async def _auto_check_plan_done(text: str, user_id: str, update: Update):
 
 # ========== Bot 启动 ==========
 
-def run_telegram_bot():
-    """启动 Telegram Bot"""
+def start_telegram_bot():
+    """初始化 Telegram Bot，返回 Application 对象"""
     if not TELEGRAM_TOKEN:
         logger.warning("Telegram Token 未配置，跳过 Bot 启动")
-        return
+        return None
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -700,9 +700,22 @@ def run_telegram_bot():
 
     application.add_error_handler(error_handler)
 
-    logger.info("Sunday Telegram Bot 已启动 💕")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Sunday Telegram Bot 已初始化 💕")
+    return application
+
+
+async def run_telegram_bot(application: Application):
+    """启动 Telegram Bot 轮询"""
+    if not application:
+        return
+    logger.info("Sunday Telegram Bot 开始轮询... 💕")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    run_telegram_bot()
+    app = start_telegram_bot()
+    if app:
+        import asyncio as _a
+        _a.run(run_telegram_bot(app))
