@@ -403,7 +403,10 @@ def _build_user_profile(user_id: str) -> str:
 def _build_user_profile(user_id: str) -> str:
     """构建用户画像（兼容旧接口）"""
     ctx = _build_llm_user_context(user_id)
-    return ctx["profile_text"]
+    parts = [ctx["memory_text"]]
+    if ctx["recent_emails"]:
+        parts.append(ctx["recent_emails"])
+    return "\n\n".join(parts)
 
 
 # ============================================================
