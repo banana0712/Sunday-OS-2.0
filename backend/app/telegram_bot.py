@@ -181,8 +181,31 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             print(f"🎵 [MUSIC] AI 决定唱歌！主题={song_theme} 风格={song_style}")
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
             try:
+                # 判断用户是否想听指定歌曲
+                import re as _re
+                song_name_match = _re.search(r'唱(.{1,20})(?:这首歌|那首歌|这首|那首|给我听|吧|呗|嘛)?$', text)
+                specified_song = song_name_match.group(1) if song_name_match else ""
+
                 # 用专用 prompt 让 LLM 生成歌词
-                lyrics_prompt = f"""请创作一首简短可爱的歌词。
+                if specified_song and len(specified_song) >= 2:
+                    lyrics_prompt = f"""请写出歌曲「{specified_song}」中你记得的歌词片段。
+
+要求：
+- 输出歌曲中最经典、最耳熟能详的4-8句歌词，每句一行
+- 如果记不清完整歌词，就写出你记得的片段
+- 用[verse]和[chorus]标记段落
+- 只输出歌词本身，不要任何其他文字
+
+示例（如果用户指定「小幸运」）：
+[verse]
+原来你是我最想留住的幸运
+原来我们和爱情曾经靠得那么近
+[chorus]
+那为我对抗世界的决定
+那陪我淋的雨
+一幕幕都是你 一尘不染的真心"""
+                else:
+                    lyrics_prompt = f"""请创作一首简短可爱的歌词。
 
 用户想听的主题：{song_theme}
 音乐风格：{song_style}
