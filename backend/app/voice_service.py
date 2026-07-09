@@ -250,6 +250,22 @@ class VoiceService:
 
         return b"".join(audio_chunks)
 
+    async def synthesize_singing(self, text: str) -> bytes:
+        """
+        唱歌模式：用甜美歌声合成歌词。
+        自动清洗括号内容 + 逐句合成。
+        """
+        import re
+        text = re.sub(r'[（(].*?[）)]', '', text)
+        text = text.strip()
+        context_text = EMOTION_PROMPTS.get("singing", "")
+        chunks = self.split_for_tts(text, max_chars=200)
+        audio_parts = []
+        for chunk in chunks:
+            audio = await self._synthesize_chunk(chunk, context_text)
+            audio_parts.append(audio)
+        return b"".join(audio_parts)
+
     @staticmethod
     def split_for_tts(text: str, max_chars: int = 300) -> list[str]:
         """
@@ -291,6 +307,7 @@ EMOTION_PROMPTS = {
     "lazy": "用慵懒随意的声音，软绵绵的很放松，像刚睡醒在被窝里聊天，语速慢一点",
     "shy": "用害羞的声音，语调微微上扬，声音轻一点，带着一点不好意思",
     "comfort": "用温柔心疼的声音，轻声安慰，像在抱抱对方，声音柔软温暖",
+    "singing": "用甜美柔和的歌声，像在轻轻哼唱，旋律优美温柔，像睡前摇篮曲一样，慢慢地唱，每个字都带着旋律和节奏",
     "default": "用自然甜美的声音，像和朋友聊天一样，语调温柔上扬",
 }
 

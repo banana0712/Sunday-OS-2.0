@@ -129,8 +129,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         memory_store.add_conversation(user_id, "user", f"[语音] {text}")
         log("chat", user_id, "telegram", f"[语音] {text[:100]}")
 
-        # 5. LLM 生成回复
+        # 5. LLM 生成回复（期间保持录音中状态）
+        # 注意：_process_message_text 内部会发 TYPING，我们需要覆盖它
         reply = await _process_message_text(text, user_id, update, context)
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
         if not reply:
             await update.message.reply_text("嗯... 刚才想说什么来着~ 🥺")
@@ -139,7 +141,15 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # 6. TTS 合成语音
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
         try:
-            audio_reply = await voice_service.synthesize(reply, emotion="sweet")
+            # 检测唱歌请求
+            sing_keywords = ["唱歌", "唱一首", "唱个歌", "唱支歌", "唱什么", "唱一个", "来一首", "来一个", "唱来听听"]
+            is_singing = any(kw in text for kw in sing_keywords)
+            if is_singing:
+                print(f"🎤 [VOICE] 检测到唱歌请求，使用 singing 模式")
+                audio_reply = await voice_service.synthesize_singing(reply)
+            else:
+                audio_reply = await voice_service.synthesize(reply, emotion="sweet")
+
             import io
             voice_file = io.BytesIO(audio_reply)
             voice_file.name = "reply.mp3"
