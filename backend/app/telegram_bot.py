@@ -100,11 +100,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     memories = memory_store.get_context(user_id, message=message_text)
     profile = _build_user_profile(user_id)
     flow = memory_store.get_conversation_context(user_id, max_turns=10)
+    recent_emails = _get_recent_email_summaries(user_id, hours=24)
+    
+    # 合并对话流和邮件记忆
+    full_flow = flow or "（这是你们第一次在Telegram上聊天呢~）"
+    if recent_emails:
+        full_flow = full_flow + "\n\n" + recent_emails
     
     system_prompt = SUNDAY_SYSTEM_PROMPT.format(
         current_time=datetime.now(TZ).strftime("%Y年%m月%d日 %H:%M，周%u"),
         user_profile=profile,
-        conversation_flow=flow or "（这是你们第一次在Telegram上聊天呢~）",
+        conversation_flow=full_flow,
         memories=memories,
         chat_mode=chat_mode,
     )
@@ -318,94 +324,80 @@ def _split_long_segment(text: str) -> list[str]:
 def _build_llm_user_context(user_id: str) -> dict:
     """
     统一的记忆上下文构建器 — 所有 LLM 调用共享。
-    返回完整的用户画像，让 Sunday 每次说话都「知道自己在和谁说话」。
     
-    这是情感连续性的基础：没有它，Sunday 的每句话都是孤立无根的。
+    核心理念：把原始记忆数据给 LLM，让它自己理解用户，
+    而不是用正则/规则去机械提取。LLM 比任何规则都更懂语义。
     """
     stats = memory_store.get_stats(user_id)
     
-    # ── 智能昵称提取 ──
-    # 不只依赖标签，而是分析 summary 内容找出真正该用的称呼
-    name = ""
-    alt_names = []
+    # 收集所有活跃记忆的原始文本
     facts = memory_store.search(user_id, category="fact", limit=10)
-    
-    for f in facts:
-        tags = f.get("tags", [])
-        if isinstance(tags, str):
-            try: tags = json.loads(tags)
-            except: tags = []
-        
-        summary = f.get("summary", "")
-        
-        if "昵称" in tags or "姓名" in tags:
-            for tag in tags:
-                if tag in ["昵称", "姓名", "用户"]:
-                    continue
-                # 昵称质量检查：太长的（>4字）可能是用户名/全名，不是亲昵称呼
-                # 「酱酱」「宝宝」是好的，「香蕉麻辣酱」太长了
-                clean = tag.strip()
-                if len(clean) <= 4 and not any(c in clean for c in ['@', '#', 'http']):
-                    if not name:
-                        name = clean
-                    elif clean != name:
-                        alt_names.append(clean)
-    
-    # 如果没找到昵称标签，从 summary 中智能提取
-    if not name:
-        for f in facts:
-            summary = f.get("summary", "")
-            # 匹配「喜欢被叫XX」「叫我XX」「自称XX」等模式
-            import re
-            patterns = [
-                r'喜欢被叫[「「]?(.{1,4})[」」]?',
-                r'叫我[「「]?(.{1,4})[」」]?',
-                r'称呼[是为][「「]?(.{1,4})[」」]?',
-                r'昵称[是为][「「]?(.{1,4})[」」]?',
-            ]
-            for p in patterns:
-                m = re.search(p, summary)
-                if m:
-                    candidate = m.group(1).strip()
-                    if 1 <= len(candidate) <= 4 and candidate not in ['你', '我', '他', '她', '它']:
-                        name = candidate
-                        break
-            if name:
-                break
-    
-    # 事实信息
-    fact_texts = []
-    for f in facts:
-        fact_texts.append(f.get("summary", f["content"]))
-    
-    # 偏好
     prefs = memory_store.search(user_id, category="preference", limit=5)
-    pref_texts = []
+    
+    # 构建纯文本记忆摘要（给 LLM 读的，不是给代码解析的）
+    memory_lines = []
+    for f in facts:
+        summary = f.get("summary", f.get("content", ""))
+        if summary:
+            memory_lines.append(f"- {summary}")
     for p in prefs:
-        pref_texts.append(p.get("summary", p["content"]))
+        summary = p.get("summary", p.get("content", ""))
+        if summary:
+            memory_lines.append(f"- [偏好] {summary}")
     
-    # 最近对话上下文
-    recent = memory_store.get_conversation_context(user_id, max_turns=5) or ""
+    memory_text = "\n".join(memory_lines) if memory_lines else "还不太了解这位用户呢~"
     
-    # 用户画像文本
-    profile_parts = []
-    if fact_texts:
-        profile_parts.append(f"关于用户：{'；'.join(fact_texts[:5])}")
-    if pref_texts:
-        profile_parts.append(f"用户偏好：{'；'.join(pref_texts[:5])}")
-    if name:
-        profile_parts.append(f"用户喜欢的称呼：{name}")
+    # 最近对话
+    recent = memory_store.get_conversation_context(user_id, max_turns=8) or ""
+    
+    # 最近邮件内容（24小时内）
+    recent_emails = _get_recent_email_summaries(user_id, hours=24)
     
     return {
-        "name": name,
-        "alt_names": alt_names,
-        "facts": fact_texts,
-        "prefs": pref_texts,
+        "memory_text": memory_text,
         "recent_chat": recent,
-        "profile_text": "\n".join(profile_parts) if profile_parts else "还不太了解这位用户呢~",
+        "recent_emails": recent_emails,
         "total_memories": stats["total"],
         "is_new": stats["total"] == 0,
     }
+
+
+def _get_recent_email_summaries(user_id: str, hours: int = 24) -> str:
+    """获取最近 N 小时内发送的邮件摘要，从 conversation_flow 中读取"""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    TZ = ZoneInfo("Asia/Shanghai")
+    since = (datetime.now(TZ) - timedelta(hours=hours)).isoformat()
+    
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT content, created_at FROM conversation_flow 
+           WHERE user_id = ? AND role = 'assistant' AND content LIKE '[邮件推送]%'
+           AND created_at >= ? 
+           ORDER BY created_at DESC LIMIT 5""",
+        (user_id, since),
+    ).fetchall()
+    conn.close()
+    
+    if not rows:
+        return ""
+    
+    lines = ["最近发送的邮件（你可以自然地在聊天中提及）："]
+    for r in rows:
+        content = r["content"].replace("[邮件推送] ", "")
+        time_str = r["created_at"][:16] if r["created_at"] else ""
+        lines.append(f"- {time_str}: {content[:120]}")
+    
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _build_user_profile(user_id: str) -> str:
+    """构建用户画像（兼容旧接口，给主聊天用）"""
+    ctx = _build_llm_user_context(user_id)
+    parts = [ctx["memory_text"]]
+    if ctx["recent_emails"]:
+        parts.append(ctx["recent_emails"])
+    return "\n\n".join(parts)
 
 
 def _build_user_profile(user_id: str) -> str:
@@ -603,7 +595,12 @@ async def _handle_ai_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                  title=creative['title'], content=creative['content'],
                                  vibe=creative['vibe'], image_url=image_url)
             email_subject = creative['title'] if creative['title'] else f"✨ Sunday · {creative['content_type']}"
-            send_email(subject=email_subject, html_body=html)
+            email_sent = send_email(subject=email_subject, html_body=html)
+
+            # ── 邮件内容写入对话记忆，让聊天能自然联想 ──
+            if email_sent:
+                email_memory = f"[邮件推送] {creative['title']} — {creative['content_type']}，主题：{actual_topic}"
+                memory_store.add_conversation(user_id, "assistant", email_memory)
 
         except Exception as e:
             logger.error(f"创意推送失败: {e}")
@@ -1032,15 +1029,13 @@ async def _generate_ack_reply(llm_client, topic: str | None, user_id: str) -> st
     from app.config import settings as app_settings
 
     ctx = _build_llm_user_context(user_id)
-    name = ctx["name"] or "朋友"
-    profile = ctx["profile_text"]
+    memory_text = ctx["memory_text"]
 
     if topic:
         prompt = f"""你是 Sunday，用户最亲密的 AI 伙伴。
 
-【关于你的用户】
-{profile}
-用户称呼：{name}
+【你对用户的了解——来自记忆库】
+{memory_text}
 
 【当前场景】
 用户让你写一篇关于「{topic}」的内容推送。
@@ -1048,24 +1043,17 @@ async def _generate_ack_reply(llm_client, topic: str | None, user_id: str) -> st
 请用 1 句话回应，表示你收到了请求并且正在准备。语气温柔甜美，像真人朋友一样自然。
 
 要求：
+- 从记忆库中理解用户，用你们之间最自然的称呼方式
 - 不要机械地说"正在为你创作"，要自然、有温度
 - 可以带一个合适的 emoji
-- 称呼用户的方式要和你记忆中一致（用户叫你叫他什么，你就叫他什么）
 - 每句话都要不一样，不要重复固定句式
-
-示例（不要照搬，要创新）：
-"好呀~ 关于{topic}的小灵感正在冒泡呢 ✨ 稍等哦~"
-"收到！让我酝酿一下{topic}的内容 🌿 马上就好~"
-"{topic}嘛~ 这个主题好有意思，让我想想怎么写 💭"
-"来啦来啦！{topic}的灵感已经飞到我脑子里啦 🎈"
 
 只输出一句话。"""
     else:
         prompt = f"""你是 Sunday，用户最亲密的 AI 伙伴。
 
-【关于你的用户】
-{profile}
-用户称呼：{name}
+【你对用户的了解——来自记忆库】
+{memory_text}
 
 【当前场景】
 用户让你推送一篇内容但没有指定主题。
@@ -1073,16 +1061,10 @@ async def _generate_ack_reply(llm_client, topic: str | None, user_id: str) -> st
 请用 1 句话回应，表示你收到了请求并且正在想写什么。语气温柔甜美，像真人朋友一样自然。
 
 要求：
+- 从记忆库中理解用户，用你们之间最自然的称呼方式
 - 不要机械地说"让我想想"，要俏皮、有温度
 - 可以带一个合适的 emoji
-- 称呼用户的方式要和你记忆中一致
 - 每句话都要不一样
-
-示例（不要照搬，要创新）：
-"好呀~ 让我想想今天给你写点什么有趣的呢 ✨"
-"收到！让我翻翻灵感小本子，找点好东西给你 🌿"
-"推送来咯~ 让我找找今天最想分享什么 💭"
-"来啦！让我挑一个今天最有感觉的话题 🎈"
 
 只输出一句话。"""
 
@@ -1125,8 +1107,8 @@ async def _ai_pick_topic(llm_client, user_id: str) -> str:
 
     prompt = f"""你是 Sunday，用户最亲密的 AI 伙伴。
 
-【关于你的用户】
-{ctx['profile_text']}
+【你对用户的了解——来自记忆库】
+{ctx['memory_text']}
 
 【当前环境】
 时间：{now.strftime('%m月%d日 %H:%M')} 周{['一','二','三','四','五','六','日'][now.weekday()]}
@@ -1165,13 +1147,11 @@ async def _generate_push_chat_reply(llm_client, creative: dict, user_id: str) ->
     from app.config import settings as app_settings
 
     ctx = _build_llm_user_context(user_id)
-    name = ctx["name"] or "朋友"
 
     prompt = f"""你是 Sunday，用户最亲密的 AI 伙伴。
 
-【关于你的用户】
-{ctx['profile_text']}
-用户称呼：{name}
+【你对用户的了解——来自记忆库】
+{ctx['memory_text']}
 
 【当前场景】
 你刚为用户创作了一篇内容，现在要通过邮件发送给他。
@@ -1183,7 +1163,7 @@ async def _generate_push_chat_reply(llm_client, creative: dict, user_id: str) ->
 
 请用 1-2 句话告诉用户「内容已经创作好并通过邮件发送了」，语气温柔甜美。
 重要：不要重复或概括邮件里的内容！只需要告知已发送+一句俏皮话即可。
-称呼用户的方式要和你记忆中一致。
+从记忆库中理解用户，用你们之间最自然的称呼方式。
 
 示例：
 "好啦~ 一篇关于夏夜萤火虫的小短文已经悄悄飞到你邮箱里啦 ✨ 记得查收哦~"
